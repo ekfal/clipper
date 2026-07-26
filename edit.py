@@ -69,15 +69,79 @@ def _random_zoom_crop(clip, tw=CANVAS_W, th=CANVAS_H):
     return tmp.cropped(x1=x1, y1=y1, width=tw, height=th)
 
 
+EMOJI_FONT = os.environ.get(
+    "CLIPPER_EMOJI_FONT",
+    r"C:\Windows\Fonts\seguiemj.ttf" if sys.platform == "win32"
+    else "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+)
+# emoji + ZWJ/variation-selector runs (rendered with the color-emoji font)
+_EMOJI_RE = re.compile(
+    "([\U0001F000-\U0001FAFF\U0001F1E6-\U0001F1FF\u2600-\u27BF\u2B00-\u2BFF"
+    "\uFE0F\u200D]+)"
+)
+
+
+def _emoji_tile(chunk, px):
+    """Render an emoji run to an RGBA tile at height ~px. Noto Color Emoji is
+    a bitmap font (fixed size 109) — render there and rescale when needed."""
+    for size in (px, 109):
+        try:
+            f = ImageFont.truetype(EMOJI_FONT, size)
+            bbox = f.getbbox(chunk)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            if w <= 0 or h <= 0:
+                return None
+            img = Image.new("RGBA", (w + 8, h + 8), (0, 0, 0, 0))
+            ImageDraw.Draw(img).text((4 - bbox[0], 4 - bbox[1]), chunk, font=f,
+                                     embedded_color=True)
+            if size != px:
+                img = img.resize((max(1, int(img.width * px / size)),
+                                  max(1, int(img.height * px / size))))
+            return img
+        except OSError:
+            continue
+    return None
+
+
+def _mixed_text_image(text, font, fill, stroke_width=0):
+    """Render text that may contain emoji: text runs use `font`, emoji runs the
+    color-emoji font. Returns (RGBA image, visual_text_width)."""
+    px = getattr(font, "size", FONT_SIZE)
+    tiles, vis_w = [], 0
+    for chunk in _EMOJI_RE.split(text):
+        if not chunk:
+            continue
+        if _EMOJI_RE.fullmatch(chunk):
+            tile = _emoji_tile(chunk, px)
+            if tile is not None:
+                tiles.append(tile)
+                vis_w += tile.width
+            continue
+        bbox = font.getbbox(chunk)
+        left, top, right, bottom = bbox if bbox else (0, 0, 10, px)
+        w, h = right - left, bottom - top
+        pad = stroke_width + 8
+        img = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
+        kw = {"stroke_width": stroke_width, "stroke_fill": "black"} if stroke_width else {}
+        ImageDraw.Draw(img).text((pad - left, pad - top), chunk, font=font, fill=fill, **kw)
+        tiles.append(img)
+        vis_w += w
+    if not tiles:
+        return Image.new("RGBA", (10, px), (0, 0, 0, 0)), 10
+    height = max(t.height for t in tiles)
+    total_w = sum(t.width for t in tiles)
+    canvas = Image.new("RGBA", (total_w, height), (0, 0, 0, 0))
+    x = 0
+    for t in tiles:
+        canvas.paste(t, (x, (height - t.height) // 2), t)
+        x += t.width
+    return canvas, vis_w
+
+
 def _word_png(text, font, color, tmp_dir):
-    """Render one word to a transparent PNG; return (ImageClip, true_text_width)."""
-    bbox = font.getbbox(text)
-    left, top, right, bottom = bbox if bbox else (0, 0, 10, FONT_SIZE)
-    w, h = right - left, bottom - top
-    pad = STROKE + 8
-    img = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
-    ImageDraw.Draw(img).text((pad - left, pad - top), text, font=font, fill=color,
-                             stroke_width=STROKE, stroke_fill="black")
+    """Render one word (may contain emoji) to a transparent PNG;
+    return (ImageClip, visual_text_width)."""
+    img, w = _mixed_text_image(text, font, color, stroke_width=STROKE)
     path = os.path.join(tmp_dir, f"w_{uuid.uuid4().hex}.png")
     img.save(path)
     return ImageClip(path), w
@@ -101,11 +165,10 @@ def _hook_layer(text, tmp_dir, dur=HOOK_DUR):
     clips, y = [], HOOK_Y
     pad_x, pad_y, gap = 18, 10, 8
     for line in lines:
-        bbox = font.getbbox(line)
-        left, top, right, bottom = bbox if bbox else (0, 0, 10, HOOK_FONT_SIZE)
-        w, h = right - left, bottom - top
-        img = Image.new("RGBA", (w + pad_x * 2, h + pad_y * 2), (255, 255, 255, 255))
-        ImageDraw.Draw(img).text((pad_x - left, pad_y - top), line, font=font, fill="black")
+        content, _ = _mixed_text_image(line, font, "black")
+        img = Image.new("RGBA", (content.width + pad_x * 2, content.height + pad_y * 2),
+                        (255, 255, 255, 255))
+        img.paste(content, (pad_x, pad_y), content)
         path = os.path.join(tmp_dir, f"h_{uuid.uuid4().hex}.png")
         img.save(path)
         ic = ImageClip(path).with_position(((CANVAS_W - img.width) / 2, y)) \
@@ -229,7 +292,10 @@ if __name__ == "__main__":
     with open(sidecar, encoding="utf-8") as f:
         all_words = json.load(f)["words"]
     seg = [w for w in all_words if 60 <= w["start"] < 65]
-    hook = "Anak Muda Ini Sukses Jadi Clipper, 25 Juta Per Bulan !!"
+    hook = "Anak Muda Ini Sukses Jadi Clipper 😱 25 Juta Per Bulan !! 💰🔥"
+    seg = list(seg)
+    if len(seg) > 2:
+        seg[2] = dict(seg[2], word=seg[2]["word"] + " 🔥")  # karaoke emoji path
     for mode, ss in (("split", True), ("clean", False)):
         out = os.path.join(_BASE, f"smoke_{mode}.mp4")
         render_clip(vid, 60, 65, seg, out, hook=hook, split_screen=ss, bgm=ss)
