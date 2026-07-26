@@ -13,17 +13,18 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 import uuid
+from collections import namedtuple
 
 from PIL import Image, ImageDraw, ImageFont
-from moviepy import (
-    VideoFileClip, CompositeVideoClip, AudioFileClip, ColorClip,
-    ImageClip, CompositeAudioClip,
-)
-import moviepy.audio.fx as afx
+
+# One timed image pasted onto the canvas: PNG path, position, visible window.
+Overlay = namedtuple("Overlay", "path x y t_start t_end")
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
+FFMPEG = os.environ.get("CLIPPER_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
 _PARENT = os.path.dirname(_BASE)
 
 FONT_PATH = os.environ.get(
@@ -34,9 +35,17 @@ FONT_PATH = os.environ.get(
 BG_DIR = os.environ.get("CLIPPER_BG_DIR", os.path.join(_PARENT, "background_video"))
 BGM_DIR = os.environ.get("CLIPPER_BGM_DIR", os.path.join(_PARENT, "background_music"))
 CODEC = os.environ.get("CLIPPER_CODEC", "libx264")
+# Encoder knobs matter most on a small VPS: "medium" (x264's default) buys
+# quality that a re-encoded social clip never shows. Tune per host via env.
+PRESET = os.environ.get("CLIPPER_PRESET", "veryfast")
+BITRATE = os.environ.get("CLIPPER_BITRATE", "6M")
+THREADS = int(os.environ.get("CLIPPER_THREADS", str(os.cpu_count() or 4)))
+FPS = int(os.environ.get("CLIPPER_FPS", "30"))
 BGM_VOLUME = 0.1
 
 CANVAS_W, CANVAS_H = 1080, 1920
+BLUR_SIGMA = 28.0   # background blur strength (full-res equivalent)
+BLUR_SCALE = 0.25   # blur is computed at this scale, then upscaled back
 SUB_Y = 1500
 FONT_SIZE = 60
 SPACING = 12
@@ -52,21 +61,6 @@ def _random_asset(dirpath, exts):
         return random.choice(files) if files else None
     except OSError:
         return None
-
-
-def _darken(clip, factor=None):
-    f = factor or random.uniform(0.4, 0.7)
-    return clip.image_transform(lambda im: (im.astype("float") * f).clip(0, 255).astype("uint8"))
-
-
-def _random_zoom_crop(clip, tw=CANVAS_W, th=CANVAS_H):
-    zoom = random.uniform(1.2, 1.5)
-    tmp = clip.resized(width=int(tw * zoom))
-    if tmp.h < th:
-        tmp = clip.resized(height=int(th * zoom))
-    x1 = random.randint(0, max(0, tmp.w - tw))
-    y1 = random.randint(0, max(0, tmp.h - th))
-    return tmp.cropped(x1=x1, y1=y1, width=tw, height=th)
 
 
 EMOJI_FONT = os.environ.get(
@@ -138,15 +132,6 @@ def _mixed_text_image(text, font, fill, stroke_width=0):
     return canvas, vis_w
 
 
-def _word_png(text, font, color, tmp_dir):
-    """Render one word (may contain emoji) to a transparent PNG;
-    return (ImageClip, visual_text_width)."""
-    img, w = _mixed_text_image(text, font, color, stroke_width=STROKE)
-    path = os.path.join(tmp_dir, f"w_{uuid.uuid4().hex}.png")
-    img.save(path)
-    return ImageClip(path), w
-
-
 HOOK_Y = 300          # hook block top, centered style (split-screen mode)
 CLEAN_HOOK_Y = 1170   # hook block top, reference style (full-frame mode)
 CLEAN_SUB_Y = 1040    # karaoke line in full-frame mode (mid-frame, above hook)
@@ -179,20 +164,20 @@ def _quote_icon(tmp_dir, h=74):
 def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, icon=False):
     """Visual hook — stacked white boxes, black bold text (Hormozi style).
     left=True hugs HOOK_X_LEFT with a teal quote icon above (reference style);
-    otherwise centered. Returns list of positioned ImageClips."""
+    otherwise centered. Returns list of Overlay specs."""
     import textwrap
     try:
         font = ImageFont.truetype(FONT_PATH, HOOK_FONT_SIZE)
     except OSError:
         font = ImageFont.load_default()
     lines = textwrap.wrap(text.strip(), width=HOOK_MAX_CHARS)
-    clips = []
+    overlays = []
     pad_x, pad_y, gap = 18, 10, 8
     if icon:
         ip = _quote_icon(tmp_dir)
-        ic = ImageClip(ip)
-        clips.append(ic.with_position((HOOK_X_LEFT if left else (CANVAS_W - ic.w) / 2,
-                                       y - ic.h - 12)).with_start(0).with_duration(dur))
+        iw, ih = Image.open(ip).size
+        overlays.append(Overlay(ip, HOOK_X_LEFT if left else (CANVAS_W - iw) // 2,
+                                y - ih - 12, 0.0, dur))
     for line in lines:
         content, _ = _mixed_text_image(line, font, "black")
         img = Image.new("RGBA", (content.width + pad_x * 2, content.height + pad_y * 2),
@@ -200,21 +185,24 @@ def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, icon=False):
         img.paste(content, (pad_x, pad_y), content)
         path = os.path.join(tmp_dir, f"h_{uuid.uuid4().hex}.png")
         img.save(path)
-        x = HOOK_X_LEFT if left else (CANVAS_W - img.width) / 2
-        clips.append(ImageClip(path).with_position((x, y))
-                     .with_start(0).with_duration(dur))
+        x = HOOK_X_LEFT if left else (CANVAS_W - img.width) // 2
+        overlays.append(Overlay(path, int(x), int(y), 0.0, dur))
         y += img.height + gap
-    return clips
+    return overlays
 
 
 def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
-    """Build karaoke caption ImageClips for words (absolute timestamps)."""
+    """Karaoke captions as timed overlays.
+
+    Each (chunk, active-word) state is flattened into ONE image rather than one
+    per word, so a clip carries a third of the overlay inputs.
+    """
     try:
         font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
     except OSError:
         font = ImageFont.load_default()
     max_w = CANVAS_W - PADDING * 2
-    subs = []
+    overlays = []
     chunks = [words[i:i + 3] for i in range(0, len(words), 3)]
     for chunk in chunks:
         for i_w, active in enumerate(chunk):
@@ -222,33 +210,40 @@ def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
             nxt = chunk[i_w + 1]["start"] if i_w + 1 < len(chunk) else active["end"]
             w_end = max(w_start + 0.1, nxt - clip_start)
 
-            clips, widths = [], []
+            tiles, widths = [], []
             for j, w_item in enumerate(chunk):
                 text = re.sub(r"[.,!?]", "", w_item["word"].upper())
                 color = ACTIVE_COLOR if i_w == j else "white"
-                ic, tw = _word_png(text, font, color, tmp_dir)
-                clips.append(ic)
+                img, tw = _mixed_text_image(text, font, color, stroke_width=STROKE)
+                tiles.append(img)
                 widths.append(tw)
 
-            total = sum(widths) + SPACING * (len(clips) - 1)
-            scale = 1.0
-            if total > max_w:
-                scale = max_w / total
-                clips = [c.resized(scale) for c in clips]
+            total = sum(widths) + SPACING * (len(tiles) - 1)
+            scale = min(1.0, max_w / total) if total else 1.0
+            if scale < 1.0:
+                tiles = [t.resize((max(1, int(t.width * scale)),
+                                   max(1, int(t.height * scale)))) for t in tiles]
                 widths = [w * scale for w in widths]
                 total = max_w
 
-            x = (CANVAS_W - total) / 2
-            pad = (STROKE + 8) * scale
-            for j, ic in enumerate(clips):
-                subs.append(ic.with_position((x - pad, sub_y))
-                              .with_start(w_start).with_duration(w_end - w_start))
+            height = max(t.height for t in tiles)
+            line_img = Image.new("RGBA", (int(total) + 2 * int((STROKE + 8) * scale),
+                                          height), (0, 0, 0, 0))
+            pad = int((STROKE + 8) * scale)
+            x = 0
+            for j, t in enumerate(tiles):
+                line_img.paste(t, (int(x), (height - t.height) // 2), t)
                 x += widths[j] + SPACING * scale
-    return subs
+            path = os.path.join(tmp_dir, f"k_{uuid.uuid4().hex}.png")
+            line_img.save(path)
+            overlays.append(Overlay(path, int((CANVAS_W - total) / 2) - pad,
+                                    sub_y, w_start, w_end))
+    return overlays
 
 
 def render_clip(video_path, start, end, words, out_path, *,
-                hook=None, split_screen=False, bgm=True, fps=30, bitrate="10M"):
+                hook=None, split_screen=False, bgm=True, fps=FPS,
+                bitrate=BITRATE, preset=PRESET, threads=THREADS):
     """Render one vertical clip [start, end) with karaoke captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -263,73 +258,78 @@ def render_clip(video_path, start, end, words, out_path, *,
     dur = end - start
     tmp_dir = os.path.join(_BASE, f"temp_subs_{uuid.uuid4().hex[:8]}")
     os.makedirs(tmp_dir, exist_ok=True)
-    src = VideoFileClip(video_path)
-    bg_raw = bgm_clip = None
     try:
-        if split_screen:
-            bg_path = _random_asset(BG_DIR, (".mp4", ".mov", ".webm"))
-            if bg_path:
-                bg_raw = VideoFileClip(bg_path).without_audio()
-                if bg_raw.duration < dur:  # loop short bg by tiling from 0
-                    from moviepy import concatenate_videoclips
-                    n = int(dur / bg_raw.duration) + 1
-                    bg_raw = concatenate_videoclips([bg_raw] * n)
-                bg = _darken(_random_zoom_crop(bg_raw.subclipped(0, dur).resized(height=CANVAS_H)))
-            else:
-                bg = ColorClip(size=(CANVAS_W, CANVAS_H), color=(0, 0, 0), duration=dur)
-            main = (src.subclipped(start, end).resized(height=980))
-            main = main.cropped(x_center=main.w / 2, width=min(1040, main.w), height=980)
-            main = main.with_position("center")
-        else:
-            # reference style: same footage as background, heavy blur fill;
-            # main video ~62% canvas height, centered
-            import cv2
-            seg = src.subclipped(start, end)
-            bg = seg.without_audio().resized(height=CANVAS_H)
-            if bg.w > CANVAS_W:
-                bg = bg.cropped(x_center=bg.w / 2, width=CANVAS_W, height=CANVAS_H)
-            elif bg.w < CANVAS_W:
-                bg = seg.without_audio().resized(width=CANVAS_W)
-                bg = bg.cropped(y_center=bg.h / 2, width=CANVAS_W, height=CANVAS_H)
-            bg = bg.image_transform(
-                lambda im: cv2.GaussianBlur(im, (0, 0), 28))
-            bg = _darken(bg, factor=0.55)
-            main = seg.resized(height=int(CANVAS_H * 0.62))
-            if main.w > CANVAS_W:
-                main = main.cropped(x_center=main.w / 2, width=CANVAS_W,
-                                    height=main.h)
-            main = main.with_position("center")
-
         sub_y = SUB_Y if split_screen else CLEAN_SUB_Y
-        subs = _karaoke_layer(words, start, tmp_dir, sub_y=sub_y)
-        hook_clips = []
+        overlays = _karaoke_layer(words, start, tmp_dir, sub_y=sub_y)
         if hook:
-            hook_clips = _hook_layer(
+            overlays += _hook_layer(
                 hook, tmp_dir, min(HOOK_DUR, dur),
                 y=HOOK_Y if split_screen else CLEAN_HOOK_Y,
                 left=not split_screen, icon=not split_screen)
-        comp = CompositeVideoClip([bg, main] + subs + hook_clips,
-                                  size=(CANVAS_W, CANVAS_H))
 
-        audio = main.audio
-        if bgm and audio:
-            bgm_path = _random_asset(BGM_DIR, (".mp3", ".wav", ".m4a"))
-            if bgm_path:
-                bgm_clip = AudioFileClip(bgm_path)
-                if bgm_clip.duration >= dur:
-                    bgm_clip = bgm_clip.subclipped(0, dur)
-                audio = CompositeAudioClip([audio, bgm_clip.with_volume_scaled(BGM_VOLUME)])
-        if audio:
-            comp = comp.with_audio(audio.with_effects([afx.AudioFadeOut(1.0)]))
+        bg_video = _random_asset(BG_DIR, (".mp4", ".mov", ".webm")) if split_screen else None
+        bgm_path = _random_asset(BGM_DIR, (".mp3", ".wav", ".m4a")) if bgm else None
 
-        comp.write_videofile(out_path, fps=fps, codec=CODEC, bitrate=bitrate, logger=None)
+        inputs = ["-ss", f"{start}", "-t", f"{dur}", "-i", video_path]
+        if bg_video:
+            inputs += ["-stream_loop", "-1", "-t", f"{dur}", "-i", bg_video]
+        bgm_idx = None
+        if bgm_path:
+            bgm_idx = 1 + (1 if bg_video else 0)
+            inputs += ["-stream_loop", "-1", "-t", f"{dur}", "-i", bgm_path]
+        first_overlay_idx = 1 + (1 if bg_video else 0) + (1 if bgm_path else 0)
+        for ov in overlays:
+            inputs += ["-i", ov.path]
+
+        cover = (f"scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
+                 f"crop={CANVAS_W}:{CANVAS_H}")
+        chains = []
+        if split_screen and bg_video:
+            chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
+            chains.append(f"[0:v]scale=-2:980,crop=min(iw\\,1040):980[mn]")
+        else:
+            # reference style: the footage itself, blurred, fills the frame
+            chains.append(f"[0:v]split=2[bgsrc][mnsrc]")
+            chains.append(f"[bgsrc]{cover},gblur=sigma={BLUR_SIGMA},"
+                          f"eq=brightness=-0.20[bg]")
+            chains.append(f"[mnsrc]scale=-2:{int(CANVAS_H * 0.62)},"
+                          f"crop=min(iw\\,{CANVAS_W}):ih[mn]")
+        chains.append("[bg][mn]overlay=(W-w)/2:(H-h)/2[v0]")
+
+        for i, ov in enumerate(overlays):
+            src_label = f"[v{i}]"
+            dst_label = f"[v{i + 1}]"
+            chains.append(
+                f"{src_label}[{first_overlay_idx + i}:v]"
+                f"overlay={ov.x}:{ov.y}:enable='between(t,{ov.t_start:.3f},{ov.t_end:.3f})'"
+                f"{dst_label}")
+        vlabel = f"[v{len(overlays)}]"
+
+        if bgm_idx is not None:
+            chains.append(f"[{bgm_idx}:a]volume={BGM_VOLUME}[bgm]")
+            chains.append(f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0,"
+                          f"afade=t=out:st={max(0, dur - 1):.2f}:d=1[a]")
+        else:
+            chains.append(f"[0:a]afade=t=out:st={max(0, dur - 1):.2f}:d=1[a]")
+
+        # The graph can carry hundreds of overlay chains — pass it as a file so
+        # the command never hits the OS argument-length limit.
+        graph_path = os.path.join(tmp_dir, "graph.txt")
+        with open(graph_path, "w", encoding="utf-8") as f:
+            f.write(";".join(chains))
+
+        cmd = ([FFMPEG, "-y", "-v", "error"] + inputs +
+               ["-filter_complex_script", graph_path,
+                "-map", vlabel, "-map", "[a]",
+                "-c:v", CODEC, "-preset", preset, "-b:v", bitrate,
+                "-pix_fmt", "yuv420p", "-r", str(fps),
+                "-c:a", "aac", "-b:a", "128k",
+                "-threads", str(threads), "-movflags", "+faststart", out_path])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[:600]}")
         return out_path
     finally:
-        for c in (bg_raw, bgm_clip, src):
-            try:
-                c and c.close()
-            except Exception:
-                pass
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
