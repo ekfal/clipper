@@ -12,6 +12,10 @@ land at natural speech ends, not mid-word.
 import random
 
 MIN_GAP = 30.0  # §3.5: minimum seconds between allocated segments
+# YouTube heatmaps always peak at t=0 (everyone "watches" the opening), so the
+# top-valued point is an artifact, not a replayed moment. Skip the intro region
+# — capped for short footage so brand clips stay usable.
+INTRO_SKIP = 90.0
 
 # §3.5 duration ranges per platform
 DURATION_RANGES = {
@@ -43,6 +47,8 @@ def pick_segments(video_duration, heatmap, words, platform, count,
     lo, hi = DURATION_RANGES[platform]
     taken = [tuple(e) for e in existing]
     out = []
+    # never skip so much that nothing is left to clip
+    intro = min(INTRO_SKIP, max(0.0, video_duration - lo * 2))
 
     candidates = []
     if heatmap:
@@ -51,12 +57,14 @@ def pick_segments(video_duration, heatmap, words, platform, count,
     else:
         # even distribution fallback; slight jitter so retries differ
         n = max(count * 2, 4)
-        step = video_duration / n
-        candidates = [i * step + random.uniform(0, step * 0.3) for i in range(n)]
+        step = max(1e-6, (video_duration - intro) / n)
+        candidates = [intro + i * step + random.uniform(0, step * 0.3) for i in range(n)]
 
     for st in candidates:
         if len(out) >= count:
             break
+        if st < intro:
+            continue
         # snap-to-word always shortens the segment, so leave headroom above
         # the platform minimum or boundary snapping rejects every lo-length pick
         dur = random.randint(min(lo + 5, hi), hi)
@@ -100,4 +108,12 @@ if __name__ == "__main__":
     assert all(round(e, 3) in all_ends for _, e in segs)
     # no-heatmap fallback still allocates
     assert len(pick_segments(600, None, words, "youtube", 3)) == 3
+    # intro artifact: t=0 always tops a YouTube heatmap and must be skipped
+    heat0 = [{"start_time": 0.0, "value": 1.0}, {"start_time": 200.0, "value": 0.5}]
+    segs3 = pick_segments(600, heat0, words, "youtube", 2)
+    assert all(s >= INTRO_SKIP for s, _ in segs3), segs3
+    # short footage: intro skip must not starve allocation
+    short_words = [{"word": f"w{i}", "start": i * 0.5, "end": i * 0.5 + 0.4}
+                   for i in range(240)]  # 120s
+    assert pick_segments(120, None, short_words, "youtube", 1), "short footage starved"
     print("segments.py self-check OK")
