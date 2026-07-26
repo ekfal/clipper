@@ -1,0 +1,15 @@
+# secrets & sessions — never commit
+.env
+*.pickle
+client_secrets.json
+clippo_session.json
+
+# runtime state & artifacts
+*.sqlite
+*.sqlite-*
+media/
+*.words.json
+*.heatmap.json
+
+__pycache__/
+*.pyc
