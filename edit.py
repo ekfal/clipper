@@ -83,6 +83,38 @@ def _word_png(text, font, color, tmp_dir):
     return ImageClip(path), w
 
 
+HOOK_Y = 300          # hook block top (over bg / top of main video)
+HOOK_FONT_SIZE = 58
+HOOK_DUR = 3.0        # seconds the hook stays on screen
+HOOK_MAX_CHARS = 22   # wrap width per boxed line
+
+
+def _hook_layer(text, tmp_dir, dur=HOOK_DUR):
+    """Opening visual hook — Hormozi-style stacked white boxes, black bold text.
+    Shown for the first `dur` seconds. Returns list of positioned ImageClips."""
+    import textwrap
+    try:
+        font = ImageFont.truetype(FONT_PATH, HOOK_FONT_SIZE)
+    except OSError:
+        font = ImageFont.load_default()
+    lines = textwrap.wrap(text.strip(), width=HOOK_MAX_CHARS)
+    clips, y = [], HOOK_Y
+    pad_x, pad_y, gap = 18, 10, 8
+    for line in lines:
+        bbox = font.getbbox(line)
+        left, top, right, bottom = bbox if bbox else (0, 0, 10, HOOK_FONT_SIZE)
+        w, h = right - left, bottom - top
+        img = Image.new("RGBA", (w + pad_x * 2, h + pad_y * 2), (255, 255, 255, 255))
+        ImageDraw.Draw(img).text((pad_x - left, pad_y - top), line, font=font, fill="black")
+        path = os.path.join(tmp_dir, f"h_{uuid.uuid4().hex}.png")
+        img.save(path)
+        ic = ImageClip(path).with_position(((CANVAS_W - img.width) / 2, y)) \
+                            .with_start(0).with_duration(dur)
+        clips.append(ic)
+        y += img.height + gap
+    return clips
+
+
 def _karaoke_layer(words, clip_start, tmp_dir):
     """Build karaoke caption ImageClips for words (absolute timestamps)."""
     try:
@@ -124,11 +156,12 @@ def _karaoke_layer(words, clip_start, tmp_dir):
 
 
 def render_clip(video_path, start, end, words, out_path, *,
-                split_screen=True, bgm=True, fps=30, bitrate="10M"):
+                hook=None, split_screen=True, bgm=True, fps=30, bitrate="10M"):
     """Render one vertical clip [start, end) with karaoke captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
-    to the segment. split_screen=False -> clean mode (footage only, PRD §3.6).
+    to the segment. hook: headline text shown as boxed overlay for the first
+    seconds (visual hook). split_screen=False -> clean mode (PRD §3.6).
     Returns out_path.
     """
     dur = end - start
@@ -159,7 +192,9 @@ def render_clip(video_path, start, end, words, out_path, *,
             main = main.with_position("center")
 
         subs = _karaoke_layer(words, start, tmp_dir)
-        comp = CompositeVideoClip([bg, main] + subs, size=(CANVAS_W, CANVAS_H))
+        hook_clips = _hook_layer(hook, tmp_dir, min(HOOK_DUR, dur)) if hook else []
+        comp = CompositeVideoClip([bg, main] + subs + hook_clips,
+                                  size=(CANVAS_W, CANVAS_H))
 
         audio = main.audio
         if bgm and audio:
@@ -194,8 +229,9 @@ if __name__ == "__main__":
     with open(sidecar, encoding="utf-8") as f:
         all_words = json.load(f)["words"]
     seg = [w for w in all_words if 60 <= w["start"] < 65]
+    hook = "Anak Muda Ini Sukses Jadi Clipper, 25 Juta Per Bulan !!"
     for mode, ss in (("split", True), ("clean", False)):
         out = os.path.join(_BASE, f"smoke_{mode}.mp4")
-        render_clip(vid, 60, 65, seg, out, split_screen=ss, bgm=ss)
+        render_clip(vid, 60, 65, seg, out, hook=hook, split_screen=ss, bgm=ss)
         assert os.path.exists(out) and os.path.getsize(out) > 100_000, mode
         print(f"smoke {mode}: OK ({os.path.getsize(out)//1000} KB)")
