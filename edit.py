@@ -12,6 +12,7 @@ visual additions -> clean mode).
 import os
 import random
 import re
+import itertools
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 # One timed image pasted onto the canvas: PNG path, position, visible window.
 Overlay = namedtuple("Overlay", "path x y t_start t_end")
+
+_counter = itertools.count()
+
+
+def _name(prefix):
+    """Short, unique PNG filename. A long clip carries hundreds of overlay
+    inputs, and ffmpeg takes them as command-line args — full-length uuid names
+    blow past the OS argument limit, so keep them tiny and run ffmpeg with the
+    temp directory as its working directory."""
+    return f"{prefix}{next(_counter):04d}.png"
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 FFMPEG = os.environ.get("CLIPPER_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
@@ -156,7 +167,7 @@ def _quote_icon(tmp_dir, h=74):
     d.text(((img.width - (bbox[2] - bbox[0])) / 2 - bbox[0],
             (img.height - (bbox[3] - bbox[1])) / 2 - bbox[1] + h * 0.12),
            q, font=f, fill="white")
-    path = os.path.join(tmp_dir, f"q_{uuid.uuid4().hex}.png")
+    path = os.path.join(tmp_dir, _name("q"))
     img.save(path)
     return path
 
@@ -183,7 +194,7 @@ def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, icon=False):
         img = Image.new("RGBA", (content.width + pad_x * 2, content.height + pad_y * 2),
                         (255, 255, 255, 255))
         img.paste(content, (pad_x, pad_y), content)
-        path = os.path.join(tmp_dir, f"h_{uuid.uuid4().hex}.png")
+        path = os.path.join(tmp_dir, _name("h"))
         img.save(path)
         x = HOOK_X_LEFT if left else (CANVAS_W - img.width) // 2
         overlays.append(Overlay(path, int(x), int(y), 0.0, dur))
@@ -234,7 +245,7 @@ def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
             for j, t in enumerate(tiles):
                 line_img.paste(t, (int(x), (height - t.height) // 2), t)
                 x += widths[j] + SPACING * scale
-            path = os.path.join(tmp_dir, f"k_{uuid.uuid4().hex}.png")
+            path = os.path.join(tmp_dir, _name("k"))
             line_img.save(path)
             overlays.append(Overlay(path, int((CANVAS_W - total) / 2) - pad,
                                     sub_y, w_start, w_end))
@@ -270,16 +281,18 @@ def render_clip(video_path, start, end, words, out_path, *,
         bg_video = _random_asset(BG_DIR, (".mp4", ".mov", ".webm")) if split_screen else None
         bgm_path = _random_asset(BGM_DIR, (".mp3", ".wav", ".m4a")) if bgm else None
 
-        inputs = ["-ss", f"{start}", "-t", f"{dur}", "-i", video_path]
+        inputs = ["-ss", f"{start}", "-t", f"{dur}", "-i", os.path.abspath(video_path)]
         if bg_video:
-            inputs += ["-stream_loop", "-1", "-t", f"{dur}", "-i", bg_video]
+            inputs += ["-stream_loop", "-1", "-t", f"{dur}",
+                       "-i", os.path.abspath(bg_video)]
         bgm_idx = None
         if bgm_path:
             bgm_idx = 1 + (1 if bg_video else 0)
-            inputs += ["-stream_loop", "-1", "-t", f"{dur}", "-i", bgm_path]
+            inputs += ["-stream_loop", "-1", "-t", f"{dur}",
+                       "-i", os.path.abspath(bgm_path)]
         first_overlay_idx = 1 + (1 if bg_video else 0) + (1 if bgm_path else 0)
         for ov in overlays:
-            inputs += ["-i", ov.path]
+            inputs += ["-i", os.path.basename(ov.path)]  # cwd is tmp_dir
 
         cover = (f"scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
                  f"crop={CANVAS_W}:{CANVAS_H}")
@@ -314,18 +327,18 @@ def render_clip(video_path, start, end, words, out_path, *,
 
         # The graph can carry hundreds of overlay chains — pass it as a file so
         # the command never hits the OS argument-length limit.
-        graph_path = os.path.join(tmp_dir, "graph.txt")
-        with open(graph_path, "w", encoding="utf-8") as f:
+        with open(os.path.join(tmp_dir, "graph.txt"), "w", encoding="utf-8") as f:
             f.write(";".join(chains))
 
         cmd = ([FFMPEG, "-y", "-v", "error"] + inputs +
-               ["-filter_complex_script", graph_path,
+               ["-filter_complex_script", "graph.txt",
                 "-map", vlabel, "-map", "[a]",
                 "-c:v", CODEC, "-preset", preset, "-b:v", bitrate,
                 "-pix_fmt", "yuv420p", "-r", str(fps),
                 "-c:a", "aac", "-b:a", "128k",
-                "-threads", str(threads), "-movflags", "+faststart", out_path])
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+                "-threads", str(threads), "-movflags", "+faststart",
+                os.path.abspath(out_path)])
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_dir)
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[:600]}")
         return out_path
