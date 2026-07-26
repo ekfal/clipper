@@ -89,14 +89,21 @@ def process_task(conn, task):
         raise RuntimeError("empty transcript")
 
     db.set_task_status(conn, task_id, "ANALYZING")
-    heatmap = fetch.heatmap_for(video_path)
-    existing = conn.execute(
+    rows = conn.execute(
         "SELECT start_ts, end_ts FROM segment_usage WHERE video_id=? AND platform=?",
         (video_id, PLATFORM)).fetchall()
-    segments = selector.pick_segments(
-        info["duration"], heatmap, words, PLATFORM, CLIPS_PER_TASK,
-        existing=[(r["start_ts"], r["end_ts"]) for r in existing])
-    if not segments:
+    used = [(r["start_ts"], r["end_ts"]) for r in rows]
+    # topic-aware cuts first: a clip should end when its topic ends
+    picks = selector.pick_topical_segments(
+        words, PLATFORM, CLIPS_PER_TASK, existing=used,
+        video_duration=info["duration"])
+    if not picks:
+        heatmap = fetch.heatmap_for(video_path)
+        picks = [{"start": s, "end": e, "hook": None, "topic": ""}
+                 for s, e in selector.pick_segments(
+                     info["duration"], heatmap, words, PLATFORM,
+                     CLIPS_PER_TASK, existing=used)]
+    if not picks:
         raise RuntimeError("no viable segments (all used or too little speech)")
 
     db.set_task_status(conn, task_id, "EDITING")
@@ -104,10 +111,15 @@ def process_task(conn, task):
     # additions also disables BGM (PRD §3.6 compliance scan)
     allow_fx = not _wants_clean_mode(reqs)
     rendered = []  # (clip_id, path, meta)
-    for start, end in segments:
+    for pick in picks:
+        start, end = pick["start"], pick["end"]
         seg_words = selector.words_in(words, start, end)
         seg_text = " ".join(w["word"] for w in seg_words)
         meta = metadata.generate(seg_text, reqs, platform=PLATFORM)
+        # the topical pass saw the whole video, so its hook knows the context
+        # this segment was cut from; metadata only ever sees the segment
+        if pick.get("hook"):
+            meta["hook"] = pick["hook"]
         out_path = os.path.join(OUT_DIR, f"t{task_id}_{video_id}_{int(start)}.mp4")
         edit.render_clip(video_path, start, end, seg_words, out_path,
                          hook=meta["hook"], split_screen=False, bgm=allow_fx)
