@@ -13,3 +13,4 @@ media/
 
 __pycache__/
 *.pyc
+cookies.txt

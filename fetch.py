@@ -9,8 +9,18 @@ import json
 import os
 import re
 
-MEDIA_DIR = os.environ.get("CLIPPER_MEDIA", os.path.join(os.path.dirname(__file__), "media"))
-YTDLP_COOKIES = os.environ.get("CLIPPER_YT_COOKIES")  # optional cookies.txt for yt-dlp
+_BASE = os.path.dirname(os.path.abspath(__file__))
+MEDIA_DIR = os.environ.get("CLIPPER_MEDIA", os.path.join(_BASE, "media"))
+
+# Without authentication YouTube only serves up to 360p, and clips built from
+# that look soft once upscaled to a 1080x1920 canvas. Drop a Netscape-format
+# cookies.txt next to this file (or point CLIPPER_YT_COOKIES at one) to get the
+# full ladder — the approach the PRD validated on the VPS.
+YTDLP_COOKIES = os.environ.get("CLIPPER_YT_COOKIES") or (
+    os.path.join(_BASE, "cookies.txt")
+    if os.path.exists(os.path.join(_BASE, "cookies.txt")) else None
+)
+MIN_GOOD_HEIGHT = 720
 
 
 def _task_dir(task_id):
@@ -46,6 +56,11 @@ def fetch_youtube(url, task_id):
         if heatmap:
             with open(base + ".heatmap.json", "w", encoding="utf-8") as f:
                 json.dump(heatmap, f)
+        height = info.get("height") or 0
+        if height and height < MIN_GOOD_HEIGHT:
+            print(f"WARNING: {info.get('id')} downloaded at {height}p — YouTube "
+                  f"caps unauthenticated downloads at 360p. Add cookies.txt "
+                  f"(see fetch.py) for full quality.")
     return [path]
 
 
