@@ -14,3 +14,7 @@ media/
 __pycache__/
 *.pyc
 cookies.txt
+smoke_*.mp4
+out/
+e2e_test.py
+preflight_out.mp4
