@@ -48,7 +48,10 @@ def chat_json(system, user, model=MODEL, temperature=0.7):
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
-    text = resp.json()["choices"][0]["message"]["content"].strip()
+    # 9Router labels the reply text/event-stream and appends "data: [DONE]"
+    # after the complete JSON body — raw_decode takes the first JSON object.
+    body, _ = json.JSONDecoder().raw_decode(resp.text.strip())
+    text = body["choices"][0]["message"]["content"].strip()
     if text.startswith("```"):  # some models still fence despite json mode
         text = text.strip("`")
         text = text[4:] if text.startswith("json") else text
