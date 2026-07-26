@@ -48,9 +48,11 @@ def chat_json(system, user, model=MODEL, temperature=0.7):
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
-    # 9Router labels the reply text/event-stream and appends "data: [DONE]"
-    # after the complete JSON body — raw_decode takes the first JSON object.
-    body, _ = json.JSONDecoder().raw_decode(resp.text.strip())
+    # 9Router labels the reply text/event-stream with no charset, so requests
+    # would guess ISO-8859-1 and mangle emoji — decode UTF-8 explicitly. It
+    # also appends "data: [DONE]" after the JSON body, so raw_decode takes the
+    # first object.
+    body, _ = json.JSONDecoder().raw_decode(resp.content.decode("utf-8").strip())
     text = body["choices"][0]["message"]["content"].strip()
     if text.startswith("```"):  # some models still fence despite json mode
         text = text.strip("`")
