@@ -147,23 +147,52 @@ def _word_png(text, font, color, tmp_dir):
     return ImageClip(path), w
 
 
-HOOK_Y = 300          # hook block top (over bg / top of main video)
+HOOK_Y = 300          # hook block top, centered style (split-screen mode)
+CLEAN_HOOK_Y = 1170   # hook block top, reference style (full-frame mode)
+CLEAN_SUB_Y = 1040    # karaoke line in full-frame mode (mid-frame, above hook)
+HOOK_X_LEFT = 44      # left margin for reference-style boxes
 HOOK_FONT_SIZE = 58
 HOOK_DUR = 3.0        # seconds the hook stays on screen
 HOOK_MAX_CHARS = 22   # wrap width per boxed line
+QUOTE_TEAL = "#3EC6A8"
 
 
-def _hook_layer(text, tmp_dir, dur=HOOK_DUR):
-    """Opening visual hook — Hormozi-style stacked white boxes, black bold text.
-    Shown for the first `dur` seconds. Returns list of positioned ImageClips."""
+def _quote_icon(tmp_dir, h=74):
+    """Small teal rounded box with white quote marks (reference style)."""
+    img = Image.new("RGBA", (int(h * 1.25), h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([0, 0, img.width - 1, img.height - 1], radius=12, fill=QUOTE_TEAL)
+    try:
+        f = ImageFont.truetype(FONT_PATH, int(h * 1.1))
+    except OSError:
+        f = ImageFont.load_default()
+    q = "“"  # left double quote
+    bbox = f.getbbox(q)
+    d.text(((img.width - (bbox[2] - bbox[0])) / 2 - bbox[0],
+            (img.height - (bbox[3] - bbox[1])) / 2 - bbox[1] + h * 0.12),
+           q, font=f, fill="white")
+    path = os.path.join(tmp_dir, f"q_{uuid.uuid4().hex}.png")
+    img.save(path)
+    return path
+
+
+def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, icon=False):
+    """Visual hook — stacked white boxes, black bold text (Hormozi style).
+    left=True hugs HOOK_X_LEFT with a teal quote icon above (reference style);
+    otherwise centered. Returns list of positioned ImageClips."""
     import textwrap
     try:
         font = ImageFont.truetype(FONT_PATH, HOOK_FONT_SIZE)
     except OSError:
         font = ImageFont.load_default()
     lines = textwrap.wrap(text.strip(), width=HOOK_MAX_CHARS)
-    clips, y = [], HOOK_Y
+    clips = []
     pad_x, pad_y, gap = 18, 10, 8
+    if icon:
+        ip = _quote_icon(tmp_dir)
+        ic = ImageClip(ip)
+        clips.append(ic.with_position((HOOK_X_LEFT if left else (CANVAS_W - ic.w) / 2,
+                                       y - ic.h - 12)).with_start(0).with_duration(dur))
     for line in lines:
         content, _ = _mixed_text_image(line, font, "black")
         img = Image.new("RGBA", (content.width + pad_x * 2, content.height + pad_y * 2),
@@ -171,14 +200,14 @@ def _hook_layer(text, tmp_dir, dur=HOOK_DUR):
         img.paste(content, (pad_x, pad_y), content)
         path = os.path.join(tmp_dir, f"h_{uuid.uuid4().hex}.png")
         img.save(path)
-        ic = ImageClip(path).with_position(((CANVAS_W - img.width) / 2, y)) \
-                            .with_start(0).with_duration(dur)
-        clips.append(ic)
+        x = HOOK_X_LEFT if left else (CANVAS_W - img.width) / 2
+        clips.append(ImageClip(path).with_position((x, y))
+                     .with_start(0).with_duration(dur))
         y += img.height + gap
     return clips
 
 
-def _karaoke_layer(words, clip_start, tmp_dir):
+def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
     """Build karaoke caption ImageClips for words (absolute timestamps)."""
     try:
         font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
@@ -212,19 +241,23 @@ def _karaoke_layer(words, clip_start, tmp_dir):
             x = (CANVAS_W - total) / 2
             pad = (STROKE + 8) * scale
             for j, ic in enumerate(clips):
-                subs.append(ic.with_position((x - pad, SUB_Y))
+                subs.append(ic.with_position((x - pad, sub_y))
                               .with_start(w_start).with_duration(w_end - w_start))
                 x += widths[j] + SPACING * scale
     return subs
 
 
 def render_clip(video_path, start, end, words, out_path, *,
-                hook=None, split_screen=True, bgm=True, fps=30, bitrate="10M"):
+                hook=None, split_screen=False, bgm=True, fps=30, bitrate="10M"):
     """Render one vertical clip [start, end) with karaoke captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
     to the segment. hook: headline text shown as boxed overlay for the first
-    seconds (visual hook). split_screen=False -> clean mode (PRD §3.6).
+    seconds (visual hook).
+
+    Default = full-frame (reference style): footage fills the canvas, captions
+    mid-frame, hook as left-aligned quote boxes lower-third. split_screen=True
+    keeps the legacy gameplay-bg layout (per-campaign toggle, PRD §3.6).
     Returns out_path.
     """
     dur = end - start
@@ -248,14 +281,33 @@ def render_clip(video_path, start, end, words, out_path, *,
             main = main.cropped(x_center=main.w / 2, width=min(1040, main.w), height=980)
             main = main.with_position("center")
         else:
-            bg = ColorClip(size=(CANVAS_W, CANVAS_H), color=(0, 0, 0), duration=dur)
-            main = src.subclipped(start, end).resized(height=CANVAS_H)
+            # reference style: same footage as background, heavy blur fill;
+            # main video ~62% canvas height, centered
+            import cv2
+            seg = src.subclipped(start, end)
+            bg = seg.without_audio().resized(height=CANVAS_H)
+            if bg.w > CANVAS_W:
+                bg = bg.cropped(x_center=bg.w / 2, width=CANVAS_W, height=CANVAS_H)
+            elif bg.w < CANVAS_W:
+                bg = seg.without_audio().resized(width=CANVAS_W)
+                bg = bg.cropped(y_center=bg.h / 2, width=CANVAS_W, height=CANVAS_H)
+            bg = bg.image_transform(
+                lambda im: cv2.GaussianBlur(im, (0, 0), 28))
+            bg = _darken(bg, factor=0.55)
+            main = seg.resized(height=int(CANVAS_H * 0.62))
             if main.w > CANVAS_W:
-                main = main.cropped(x_center=main.w / 2, width=CANVAS_W, height=CANVAS_H)
+                main = main.cropped(x_center=main.w / 2, width=CANVAS_W,
+                                    height=main.h)
             main = main.with_position("center")
 
-        subs = _karaoke_layer(words, start, tmp_dir)
-        hook_clips = _hook_layer(hook, tmp_dir, min(HOOK_DUR, dur)) if hook else []
+        sub_y = SUB_Y if split_screen else CLEAN_SUB_Y
+        subs = _karaoke_layer(words, start, tmp_dir, sub_y=sub_y)
+        hook_clips = []
+        if hook:
+            hook_clips = _hook_layer(
+                hook, tmp_dir, min(HOOK_DUR, dur),
+                y=HOOK_Y if split_screen else CLEAN_HOOK_Y,
+                left=not split_screen, icon=not split_screen)
         comp = CompositeVideoClip([bg, main] + subs + hook_clips,
                                   size=(CANVAS_W, CANVAS_H))
 
