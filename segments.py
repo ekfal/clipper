@@ -25,7 +25,7 @@ INTRO_SKIP = 90.0
 # NOTE: youtube is 60-180 to match Clippo campaign requirements — clips over
 # 60s upload as regular videos, not Shorts.
 DURATION_RANGES = {
-    "youtube": (60, 180),
+    "youtube": (45, 60),     # Shorts hard cap
     "tiktok": (60, 180),
     "instagram": (60, 90),
 }
@@ -267,18 +267,20 @@ if __name__ == "__main__":
 
     import ai
     real = ai.chat_json
+    mid = (lo_yt + hi_yt) / 2
     ai.chat_json = lambda *a, **k: {"segments": [
-        {"start": 100.0, "end": 190.0, "topic": "T1", "hook": "H1 🔥", "reason_end": "R1"},
-        {"start": 120.0, "end": 200.0, "topic": "overlap, must drop"},   # too close to #1
-        {"start": 300.0, "end": 310.0, "topic": "too short, must drop"},  # < 60s
-        {"start": 300.0, "end": 400.0, "topic": "T2", "hook": "H2", "reason_end": "R2"},
+        {"start": 100.0, "end": 100.0 + mid, "topic": "T1", "hook": "H1 🔥", "reason_end": "R1"},
+        {"start": 110.0, "end": 110.0 + mid, "topic": "overlap, must drop"},
+        {"start": 300.0, "end": 300.0 + lo_yt - 10, "topic": "too short, must drop"},
+        {"start": 300.0, "end": 300.0 + mid, "topic": "T2", "hook": "H2", "reason_end": "R2"},
+        {"start": 450.0, "end": 450.0 + hi_yt + 60, "topic": "too long, must drop"},
     ]}
     try:
-        got = pick_topical_segments(words, "youtube", 3, video_duration=600)
+        got = pick_topical_segments(words, "youtube", 4, video_duration=600)
         assert len(got) == 2, got
         assert got[0]["topic"] == "T1" and got[1]["topic"] == "T2", got
         assert got[0]["hook"] == "H1 🔥"
-        assert all(60 <= g["end"] - g["start"] <= 180 for g in got), got
+        assert all(lo_yt <= g["end"] - g["start"] <= hi_yt for g in got), got
         # boundaries land on real word edges
         all_starts = {round(w["start"], 3) for w in words}
         all_ends = {round(w["end"], 3) for w in words}

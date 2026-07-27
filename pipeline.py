@@ -130,12 +130,16 @@ def process_task(conn, task):
         conn.execute("INSERT INTO segment_usage VALUES (?,?,?,?)",
                      (video_id, start, end, PLATFORM))
         conn.commit()
-        rendered.append((cur.lastrowid, out_path, meta))
+        # route each clip to the channel whose category fits its content
+        account, why = upload_youtube.detect_category(
+            seg_text, title=meta["title"], default=upload_youtube.ACCOUNT)
+        print(f"  clip {int(start)}s -> account {account} ({why})")
+        rendered.append((cur.lastrowid, out_path, meta, account))
 
     db.set_task_status(conn, task_id, "UPLOADING")
-    for clip_id, path, meta in rendered:
+    for clip_id, path, meta, account in rendered:
         try:
-            res = upload_youtube.upload(conn, path, meta)
+            res = upload_youtube.upload(conn, path, meta, account=account)
         except upload_youtube.DailyLimitExceeded:
             conn.execute("UPDATE clips SET status='EDITED' WHERE clip_id=?", (clip_id,))
             conn.commit()
