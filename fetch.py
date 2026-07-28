@@ -12,10 +12,21 @@ import re
 _BASE = os.path.dirname(os.path.abspath(__file__))
 MEDIA_DIR = os.environ.get("CLIPPER_MEDIA", os.path.join(_BASE, "media"))
 
-# Without authentication YouTube only serves up to 360p, and clips built from
-# that look soft once upscaled to a 1080x1920 canvas. Drop a Netscape-format
-# cookies.txt next to this file (or point CLIPPER_YT_COOKIES at one) to get the
-# full ladder — the approach the PRD validated on the VPS.
+# Without authentication YouTube serves at most 360p (the unauthenticated web
+# and tv clients get SABR-only, i.e. nothing usable), and clips built from that
+# look soft once upscaled to a 1080x1920 canvas. Cookies are mandatory for the
+# full format ladder — a PO token alone does NOT unlock higher resolutions, it
+# only keeps requests from being rejected, so a flagged IP needs both.
+#
+# Drop a Netscape-format cookies.txt next to this file, or point
+# CLIPPER_YT_COOKIES at one. Export it from an incognito window that is closed
+# straight afterwards and never reopened: YouTube rotates cookies on live
+# sessions, which invalidates the export within days.
+#
+# On a flagged IP (VPS ranges usually are), also install the PO token provider
+# — it hooks into yt-dlp automatically, no change needed here:
+#   pip install -U bgutil-ytdlp-pot-provider
+#   docker run -d --init -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
 YTDLP_COOKIES = os.environ.get("CLIPPER_YT_COOKIES") or (
     os.path.join(_BASE, "cookies.txt")
     if os.path.exists(os.path.join(_BASE, "cookies.txt")) else None
