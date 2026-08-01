@@ -13,8 +13,17 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-API_BASE = "https://app.clippo.id/api/proxy"
+APP_BASE = "https://app.clippo.id"
+API_BASE = f"{APP_BASE}/api/proxy"
 SOURCE = "clippo"
+
+# submission form (PRD §3.11)
+MAX_SLOTS = 10
+MIN_VIEWS = 1000  # Clippo rejects clips below this
+URL_INPUT_SELECTOR = "input[placeholder*='Tempel URL']"
+ADD_SLOT_LABEL = "Tambahkan Klip Lainnya"
+CHECK_LABEL = "Cek Klip"
+SUBMIT_LABEL = "Ajukan Klip"
 
 # platformSupported enum, decoded from campaign briefs during recon.
 PLATFORM_ENUM = {0: "tiktok", 1: "instagram"}
@@ -128,10 +137,83 @@ class ClippoAdapter:
             return False
         return any(classify_source(u) in ("youtube", "gdrive") for u in task.footage_urls)
 
-    def submit_clip(self, ctx, campaign_id: str, clip_urls: list):
-        """PRD §3.11 — fill Clippo 10-slot form. Deferred (slice-1 = YT-only,
-        Clippo takes TikTok/IG URLs). Implement at M5 once those are live."""
-        raise NotImplementedError("submit_clip deferred to M5 (needs TikTok/IG clips)")
+    def submit_clip(self, ctx, campaign_id: str, clip_urls: list, dry_run=False):
+        """PRD §3.11 — submit clip URLs on the campaign's 10-slot form.
+
+        Flow: /campaigns/<id>/submit -> fill URL slots -> "Cek Klip" validates
+        (Clippo enforces >=1000 views per clip) -> "Ajukan Klip" commits.
+
+        dry_run fills the slots and reports state without clicking either
+        button, so the form can be exercised without touching a real campaign.
+
+        Note: the page renders duplicate mobile/desktop trees, so every lookup
+        filters to visible elements — a plain selector matches a hidden copy
+        and silently does nothing.
+        """
+        if not clip_urls:
+            raise ValueError("no clip urls")
+        if len(clip_urls) > MAX_SLOTS:
+            raise ValueError(f"{len(clip_urls)} urls exceeds the {MAX_SLOTS}-slot form")
+
+        page = ctx.new_page()
+        try:
+            page.goto(f"{APP_BASE}/campaigns/{campaign_id}/submit",
+                      wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(1500)
+
+            def visible(selector):
+                return [e for e in page.query_selector_all(selector) if e.is_visible()]
+
+            def slots():
+                return visible(URL_INPUT_SELECTOR)
+
+            def button(name):
+                for el in visible("button"):
+                    if name in (el.inner_text() or ""):
+                        return el
+                return None
+
+            # The form opens with a single slot and expands to all ten on the
+            # first click, re-rendering as it goes — so re-find the button each
+            # pass rather than holding a handle that detaches.
+            for _ in range(MAX_SLOTS):
+                if len(slots()) >= len(clip_urls):
+                    break
+                add = button(ADD_SLOT_LABEL)
+                if not add or not add.is_enabled():
+                    break
+                add.click()
+                page.wait_for_timeout(400)
+            if len(slots()) < len(clip_urls):
+                raise RuntimeError(
+                    f"only {len(slots())} slots available for {len(clip_urls)} clips")
+
+            for el, url in zip(slots(), clip_urls):
+                el.fill(url)
+            page.wait_for_timeout(800)
+
+            check = button(CHECK_LABEL)
+            if dry_run:
+                return {"submitted": False, "dry_run": True,
+                        "campaign_id": campaign_id, "clips": len(clip_urls),
+                        "slots": len(slots()),
+                        "check_enabled": bool(check and check.is_enabled())}
+
+            if not check or not check.is_enabled():
+                raise RuntimeError("'Cek Klip' stayed disabled — URLs rejected by the form")
+            check.click()
+            page.wait_for_timeout(4000)
+
+            confirm = button(SUBMIT_LABEL)
+            if not confirm or not confirm.is_enabled():
+                raise RuntimeError(
+                    f"validation failed: {page.inner_text('body')[:400]}")
+            confirm.click()
+            page.wait_for_timeout(4000)
+            return {"submitted": True, "campaign_id": campaign_id,
+                    "clips": len(clip_urls), "url": page.url}
+        finally:
+            page.close()
 
     def close(self):
         for obj in (self._ctx, self._browser):

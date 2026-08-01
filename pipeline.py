@@ -172,6 +172,62 @@ def process(conn, limit=TASKS_PER_RUN):
     return done, failed
 
 
+def eligible_clips(conn, min_views=None):
+    """Published clips past the view threshold that were never submitted."""
+    from clippo import MIN_VIEWS
+    threshold = MIN_VIEWS if min_views is None else min_views
+    return conn.execute(
+        """SELECT c.clip_id, c.published_url, c.views_last_checked, t.campaign_id
+             FROM clips c JOIN tasks t ON t.task_id = c.task_id
+            WHERE c.status = 'PUBLISHED'
+              AND c.published_url IS NOT NULL
+              AND COALESCE(c.views_last_checked, 0) >= ?
+         ORDER BY t.campaign_id, c.views_last_checked DESC""",
+        (threshold,)).fetchall()
+
+
+def submit_eligible(conn, adapter=None, dry_run=False):
+    """Group eligible clips by campaign and submit them in 10-slot batches.
+
+    Clips past the threshold but beyond a campaign's ten slots stay eligible
+    and go out on the next cycle (PRD §3.11) — nothing is dropped.
+    Returns a list of per-batch results.
+    """
+    from clippo import MAX_SLOTS
+
+    rows = eligible_clips(conn)
+    by_campaign = {}
+    for r in rows:
+        by_campaign.setdefault(r["campaign_id"], []).append(r)
+    if not by_campaign:
+        return []
+
+    adapter = adapter or active_adapters()[0]
+    ctx = adapter.authenticate()
+    results = []
+    try:
+        for campaign_id, clips in by_campaign.items():
+            batch = clips[:MAX_SLOTS]          # one batch per run per campaign
+            deferred = len(clips) - len(batch)
+            urls = [c["published_url"] for c in batch]
+            res = adapter.submit_clip(ctx, campaign_id, urls, dry_run=dry_run)
+            if not dry_run and res.get("submitted"):
+                ids = [c["clip_id"] for c in batch]
+                conn.execute(
+                    """INSERT INTO submissions
+                         (campaign_id, clip_ids, submitted_at, status)
+                       VALUES (?,?,?,'submitted')""",
+                    (campaign_id, json.dumps(ids), db._now()))
+                conn.executemany("UPDATE clips SET status='SUBMITTED' WHERE clip_id=?",
+                                 [(i,) for i in ids])
+                conn.commit()
+            res["deferred"] = deferred
+            results.append(res)
+    finally:
+        adapter.close()
+    return results
+
+
 if __name__ == "__main__":
     import sys
     conn = db.init_db()
