@@ -1,0 +1,22 @@
+# pip install -r requirements.txt
+# ffmpeg is a system package, not a Python one: apt install ffmpeg
+# playwright also needs its browser: playwright install chromium
+
+# pipeline
+yt-dlp
+gdown
+faster-whisper
+Pillow
+requests
+playwright
+
+# youtube upload
+google-api-python-client
+google-auth
+google-auth-oauthlib
+
+# dashboard.py and connect.py
+fastapi
+uvicorn
+python-multipart          # FastAPI needs this for Form() fields
+httpx2                    # only for connect.py --selfcheck

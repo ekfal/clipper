@@ -36,6 +36,7 @@ PUBLIC_BASE = os.environ.get("CLIPPER_PUBLIC_BASE", "").rstrip("/")
 TIMEOUT = 120
 CAPTION_MAX = 2200
 REEL_MIN_SEC, REEL_MAX_SEC = 5, 90
+RENEW_WINDOW = 7 * 86400   # renew a long-lived token inside its final week
 
 
 class InstagramError(RuntimeError):
@@ -58,12 +59,48 @@ def available_accounts():
     ) if os.path.isdir(TOKEN_DIR) else []
 
 
-def load_credentials(account):
+def _save(account, creds):
+    path = token_path(account)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(creds, f)
+    try:
+        os.chmod(path, 0o600)   # no-op on Windows, load-bearing on the VPS
+    except OSError:
+        pass
+
+
+def load_credentials(account, now=None):
+    """Read the account's token, renewing it before it lapses.
+
+    Long-lived Instagram tokens last 60 days and can only be renewed while
+    still valid — miss the window and the only way back is a manual re-auth.
+    Renewing inside the last week means an account that posts even once a
+    week never lapses.
+    """
     with open(token_path(account), encoding="utf-8") as f:
         creds = json.load(f)
     for key in ("access_token", "ig_user_id"):
         if not creds.get(key):
             raise InstagramError(f"instagram_{account}.json is missing {key}")
+
+    now = now or time.time()
+    expires_at = creds.get("expires_at")
+    if not expires_at or expires_at - RENEW_WINDOW > now:
+        return creds
+
+    if expires_at <= now:
+        raise InstagramError(
+            f"instagram_{account} token expired — Meta cannot renew a lapsed "
+            f"token, so this account has to be reconnected by hand")
+    res = requests.get(f"{GRAPH}/refresh_access_token", timeout=TIMEOUT,
+                       params={"grant_type": "ig_refresh_token",
+                               "access_token": creds["access_token"]})
+    body = res.json() if res.content else {}
+    if not body.get("access_token"):
+        raise InstagramError(f"instagram token renewal failed: {body.get('error')}")
+    creds["access_token"] = body["access_token"]
+    creds["expires_at"] = now + int(body.get("expires_in", 60 * 86400))
+    _save(account, creds)
     return creds
 
 
@@ -257,4 +294,43 @@ if __name__ == "__main__":
         raise AssertionError("should have raised")
     except (FileNotFoundError, InstagramError):
         pass
+
+    # token renewal: only inside the final week, and never after it lapsed
+    NOW = 1_000_000
+
+    def creds_with(expires_at):
+        with open(token_path("leo"), "w", encoding="utf-8") as f:
+            json.dump({"access_token": "tok", "ig_user_id": "179",
+                       "expires_at": expires_at}, f)
+
+    renewed = []
+
+    def fake_refresh(url, **kw):
+        renewed.append(url)
+        return FakeResp({"access_token": "fresh", "expires_in": 60 * 86400})
+
+    real_get = requests.get
+    requests.get = fake_refresh
+    try:
+        creds_with(NOW + 30 * 86400)                    # comfortably valid
+        assert load_credentials("leo", now=NOW)["access_token"] == "tok"
+        assert renewed == [], "renewed a token that had a month left"
+
+        creds_with(NOW + 2 * 86400)                     # inside the last week
+        got = load_credentials("leo", now=NOW)
+        assert got["access_token"] == "fresh", got
+        assert got["expires_at"] == NOW + 60 * 86400
+        assert len(renewed) == 1, renewed
+        with open(token_path("leo"), encoding="utf-8") as f:
+            assert json.load(f)["access_token"] == "fresh"   # written back
+
+        creds_with(NOW - 1)                             # already lapsed
+        try:
+            load_credentials("leo", now=NOW)
+            raise AssertionError("should have raised")
+        except InstagramError as e:
+            assert "reconnected by hand" in str(e), e
+        assert len(renewed) == 1, "tried to renew a dead token"
+    finally:
+        requests.get = real_get
     print("upload_instagram.py self-check OK")

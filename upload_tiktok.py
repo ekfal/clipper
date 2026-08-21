@@ -131,7 +131,46 @@ def caption_for(meta):
     return text[:CAPTION_MAX]
 
 
-def upload(conn, video_path, meta, account=None, direct=False, poll=False):
+# Interaction toggles TikTok expects a posting surface to offer. A creator
+# whose account disables one (creator_info reports it) must not have it sent
+# back as enabled, so the request is built from what the account actually
+# allows rather than from whatever the caller passed.
+TOGGLES = ("disable_comment", "disable_duet", "disable_stitch")
+
+
+def post_info_for(meta, info, privacy=None, options=None):
+    """Build the post_info body from the creator's real capabilities.
+
+    `info` is a creator_info payload. Privacy falls back to the safest option
+    the account offers rather than assuming PUBLIC_TO_EVERYONE exists — an
+    account under review may not have it.
+    """
+    options = dict(options or {})
+    allowed = info.get("privacy_level_options") or ["SELF_ONLY"]
+    level = privacy if privacy in allowed else (
+        "PUBLIC_TO_EVERYONE" if "PUBLIC_TO_EVERYONE" in allowed else allowed[0])
+
+    body = {"title": caption_for(meta), "privacy_level": level}
+    for toggle in TOGGLES:
+        # info carries e.g. comment_disabled=True when the account forbids it
+        forced = bool(info.get(toggle.replace("disable_", "") + "_disabled"))
+        body[toggle] = forced or bool(options.get(toggle))
+
+    # Commercial disclosure. Branded content cannot be posted privately —
+    # TikTok rejects the combination, so catch it here with a readable message
+    # instead of letting the API return a code.
+    branded = bool(options.get("brand_content_toggle"))
+    organic = bool(options.get("brand_organic_toggle"))
+    if branded or organic:
+        body["brand_content_toggle"] = branded
+        body["brand_organic_toggle"] = organic
+        if branded and level == "SELF_ONLY":
+            raise TikTokError("branded content cannot be posted to SELF_ONLY")
+    return body
+
+
+def upload(conn, video_path, meta, account=None, direct=False, poll=False,
+           privacy=None, options=None):
     """Send one clip to TikTok. Returns {publish_id, account, mode, url}.
 
     conn is unused — the signature matches upload_youtube.upload so both sit
@@ -155,10 +194,8 @@ def upload(conn, video_path, meta, account=None, direct=False, poll=False):
 
     if direct:
         info = creator_info(creds)
-        allowed = info.get("privacy_level_options") or ["SELF_ONLY"]
-        level = "PUBLIC_TO_EVERYONE" if "PUBLIC_TO_EVERYONE" in allowed else allowed[0]
         data = _api(creds, "/post/publish/video/init/", {
-            "post_info": {"title": caption_for(meta), "privacy_level": level},
+            "post_info": post_info_for(meta, info, privacy, options),
             "source_info": source})
     else:
         data = _api(creds, "/post/publish/inbox/video/init/", {"source_info": source})
@@ -282,6 +319,26 @@ if __name__ == "__main__":
         assert init[2]["post_info"]["privacy_level"] == "PUBLIC_TO_EVERYONE", init
         assert init[2]["post_info"]["title"].startswith("cuan #leogiovanni")
         assert res["status"]["status"] == "SEND_TO_USER_INBOX", res
+
+        # post_info is built from what the account actually allows
+        info = {"privacy_level_options": ["PUBLIC_TO_EVERYONE", "SELF_ONLY"],
+                "comment_disabled": True, "duet_disabled": False}
+        body = post_info_for(meta, info, privacy="SELF_ONLY")
+        assert body["privacy_level"] == "SELF_ONLY"
+        assert body["disable_comment"] is True      # account forbids it, we obey
+        assert body["disable_duet"] is False
+        body = post_info_for(meta, info, privacy="FRIENDS")   # not on offer
+        assert body["privacy_level"] == "PUBLIC_TO_EVERYONE", body
+        body = post_info_for(meta, info, options={"disable_duet": True})
+        assert body["disable_duet"] is True         # caller may add, never remove
+        locked = post_info_for(meta, {"privacy_level_options": ["SELF_ONLY"]})
+        assert locked["privacy_level"] == "SELF_ONLY"
+        try:
+            post_info_for(meta, info, privacy="SELF_ONLY",
+                          options={"brand_content_toggle": True})
+            raise AssertionError("branded + private should be rejected")
+        except TikTokError as e:
+            assert "SELF_ONLY" in str(e), e
 
         # rate limits surface as the same exception the pipeline already defers on
         requests.post = lambda url, **kw: FakeResp(
