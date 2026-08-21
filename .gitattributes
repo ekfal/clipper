@@ -1,0 +1,2 @@
+# run.sh must stay LF or bash on the VPS chokes on the carriage returns
+*.sh text eol=lf
