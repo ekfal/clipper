@@ -237,7 +237,12 @@ def process(conn, limit=TASKS_PER_RUN):
             break
         except Exception as e:
             traceback.print_exc()
-            db.set_task_status(conn, task["task_id"], "FAILED", str(e)[:500])
+            # FAILED overwrites the status, so record which stage died first —
+            # watchdog.py classifies on it and cannot recover it afterwards.
+            stage = conn.execute("SELECT status FROM tasks WHERE task_id=?",
+                                 (task["task_id"],)).fetchone()["status"]
+            db.set_task_status(conn, task["task_id"], "FAILED",
+                               f"{stage}: {type(e).__name__}: {e}"[:500])
             failed += 1
     return done, failed
 
@@ -298,20 +303,54 @@ def submit_eligible(conn, adapter=None, dry_run=False):
     return results
 
 
+def guarded(conn, label, fn, *args, **kwargs):
+    """Run one phase; turn a crash into a routed incident instead of a dead run.
+
+    crawl() in particular fails on an expired Clippo session — the single most
+    likely failure on a long-running box — and it owns no task row, so without
+    this the process died with nothing recorded and nobody told.
+    """
+    import notify
+    import watchdog
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        traceback.print_exc()
+        detail = f"{label}: {type(e).__name__}: {e}"
+        kind, advice = watchdog.classify(detail)
+        fp = watchdog.fingerprint(label.upper(), detail)
+        watchdog.init(conn)
+        row = conn.execute("SELECT 1 FROM incidents WHERE fingerprint=?", (fp,)).fetchone()
+        conn.execute(
+            "INSERT INTO incidents (fingerprint, kind, stage, error, status, "
+            "first_seen, last_seen) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(fingerprint) DO UPDATE SET seen=seen+1, last_seen=excluded.last_seen",
+            (fp, kind, label.upper(), detail[:500], "open", db._now(), db._now()))
+        conn.commit()
+        if row is None:  # first time only — a crash loop must not flood the channel
+            notify.send(f"```{detail[:600]}```\n{advice}",
+                        title=f"{label} failed [{fp}]",
+                        tag="@here" if kind == "NEEDS_HUMAN" else None)
+        return None
+
+
 if __name__ == "__main__":
     import sys
     conn = db.init_db()
     if "--crawl-only" in sys.argv:
-        print("crawl:", crawl(conn))
+        print("crawl:", guarded(conn, "crawl", crawl, conn))
     elif "--process-only" in sys.argv:
         print("process:", process(conn))
     elif "--submit-only" in sys.argv:
         print("views synced:", upload_youtube.sync_views(conn))
         print("submit:", submit_eligible(conn, dry_run="--dry-run" in sys.argv))
     else:
-        print("crawl:", crawl(conn))
+        import watchdog
+        print("crawl:", guarded(conn, "crawl", crawl, conn))
         print("process:", process(conn))
         # a clip only becomes submittable once YouTube reports its views, so the
         # count has to be refreshed before the threshold is applied
-        print("views synced:", upload_youtube.sync_views(conn))
-        print("submit:", submit_eligible(conn))
+        print("views synced:", guarded(conn, "sync_views",
+                                       upload_youtube.sync_views, conn))
+        print("submit:", guarded(conn, "submit", submit_eligible, conn))
+        print("watchdog:", watchdog.scan(conn))
