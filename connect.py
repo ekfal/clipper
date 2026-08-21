@@ -30,6 +30,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 import upload_instagram
 import upload_tiktok
+import upload_youtube
 
 app = FastAPI(title="Clipper connect")
 HOST = os.environ.get("CLIPPER_CONNECT_HOST", "127.0.0.1")
@@ -46,6 +47,11 @@ TIKTOK_SCOPES = "user.info.basic,user.info.profile,video.upload,video.publish"
 IG_ID = os.environ.get("INSTAGRAM_APP_ID", "")
 IG_SECRET = os.environ.get("INSTAGRAM_APP_SECRET", "")
 IG_SCOPES = "instagram_business_basic,instagram_business_content_publish"
+# YouTube uses the Google client-secrets file rather than a key pair in env.
+CLIENT_SECRETS = os.environ.get(
+    "CLIPPER_CLIENT_SECRETS", os.path.join(os.path.dirname(__file__), "client_secrets.json"))
+YT_SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
+             "https://www.googleapis.com/auth/youtube.readonly"]
 
 # Anyone who reaches /oauth/*/start can write a credential file into the token
 # directory, so the flow is gated. Unset means the connect flow is closed —
@@ -62,13 +68,13 @@ def _esc(v):
     return ("" if v is None else str(v)).replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
 
 
-def _issue_state(platform):
+def _issue_state(platform, extra=None):
     now = time.time()
-    for k, (_, born) in list(_PENDING.items()):
+    for k, (_, born, _x) in list(_PENDING.items()):
         if now - born > STATE_TTL:
             del _PENDING[k]
     state = secrets.token_urlsafe(24)
-    _PENDING[state] = (platform, now)
+    _PENDING[state] = (platform, now, extra)
     return state
 
 
@@ -82,6 +88,7 @@ def _take_state(state, platform):
     if not got or got[0] != platform or time.time() - got[1] > STATE_TTL:
         raise ValueError("invalid or expired state")
     del _PENDING[state]
+    return got[2]
 
 
 def _gate(key):
@@ -146,21 +153,27 @@ def _msg(text, bad=False):
 def index(request: Request):
     key = request.query_params.get("key", "")
     rows = ""
-    for platform, mod in (("tiktok", upload_tiktok), ("instagram", upload_instagram)):
+    for platform, mod in (("youtube", upload_youtube), ("tiktok", upload_tiktok),
+                          ("instagram", upload_instagram)):
         for name in mod.available_accounts():
             rows += f"<tr><td>{_esc(platform)}</td><td>{_esc(name)}</td></tr>"
     rows = rows or '<tr><td colspan="2" class="note">nothing connected yet</td></tr>'
 
     forms = ""
-    for platform, configured in (("tiktok", bool(TIKTOK_KEY)),
+    MISSING = {"youtube": f"a client_secrets.json at {CLIENT_SECRETS}",
+               "tiktok": "TIKTOK_CLIENT_KEY", "instagram": "INSTAGRAM_APP_ID"}
+    for platform, configured in (("youtube", os.path.exists(CLIENT_SECRETS)),
+                                 ("tiktok", bool(TIKTOK_KEY)),
                                  ("instagram", bool(IG_ID))):
         if configured:
+            extra = ('<input type="text" name="name" placeholder="channel name, e.g. Gaming">'
+                     if platform == "youtube" else "")
             forms += (f'<form method="get" action="/oauth/{platform}/start">'
-                      f'<input type="hidden" name="key" value="{_esc(key)}">'
+                      f'<input type="hidden" name="key" value="{_esc(key)}">{extra}'
                       f'<button>Connect {platform.title()}</button></form>')
         else:
-            env = "TIKTOK_CLIENT_KEY" if platform == "tiktok" else "INSTAGRAM_APP_ID"
-            forms += f'<p class="note">{platform.title()}: set <code>{env}</code> first.</p>'
+            forms += (f'<p class="note">{platform.title()}: needs '
+                      f'<code>{_esc(MISSING[platform])}</code> first.</p>')
 
     return page("Connect accounts", f"""
 <h1>Connect accounts</h1>
@@ -171,6 +184,7 @@ You can disconnect at any time from the app's settings on the platform itself.</
 <table><tr><th>Platform</th><th>Account</th></tr>{rows}</table></div>
 <div class="card"><div class="row">{forms}</div>
 <p class="note" style="margin-top:16px">Redirect URIs to register with each platform:<br>
+<code>{_esc(redirect_uri("youtube"))}</code><br>
 <code>{_esc(redirect_uri("tiktok"))}</code><br>
 <code>{_esc(redirect_uri("instagram"))}</code></p></div>
 <p class="note"><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms</a>
@@ -284,6 +298,84 @@ def instagram_callback(request: Request):
 def _home(msg="", bad=False):
     q = urlencode({"msg": msg, "bad": "1" if bad else ""})
     return RedirectResponse(f"/?{q}", status_code=303)
+
+
+def _safe_name(raw, fallback="account"):
+    return "".join(c for c in (raw or "") if c.isalnum() or c in "-_") or fallback
+
+
+def _yt_flow():
+    """Google's web OAuth flow for one YouTube channel."""
+    from google_auth_oauthlib.flow import Flow
+    if not os.path.exists(CLIENT_SECRETS):
+        raise FileNotFoundError(
+            f"{CLIENT_SECRETS} not found — download the OAuth client JSON from "
+            f"Google Cloud Console and put it there")
+    return Flow.from_client_secrets_file(CLIENT_SECRETS, scopes=YT_SCOPES,
+                                         redirect_uri=redirect_uri("youtube"))
+
+
+@app.get("/oauth/youtube/start")
+def youtube_start(request: Request):
+    """Mint a token_<name>.pickle for one channel.
+
+    `name` matters: it is both the token filename and the category the clip
+    router picks between, so pass the channel's niche ("Gaming", "Podcast"),
+    not a display name. It also has to match the accounts registry username.
+    """
+    try:
+        _gate(request.query_params.get("key", ""))
+        flow = _yt_flow()
+    except (PermissionError, FileNotFoundError) as e:
+        return _home(str(e), bad=True)
+    name = _safe_name(request.query_params.get("name", ""), "")
+    url, state = flow.authorization_url(
+        access_type="offline", include_granted_scopes="true",
+        prompt="consent",  # without it Google withholds the refresh token on re-auth
+        state=_issue_state("youtube", name))
+    return RedirectResponse(url, status_code=303)
+
+
+@app.get("/oauth/youtube/callback")
+def youtube_callback(request: Request):
+    import pickle
+
+    p = request.query_params
+    if p.get("error"):
+        return _home(f"Google declined: {p['error']}", bad=True)
+    try:
+        chosen = _take_state(p.get("state", ""), "youtube")
+        flow = _yt_flow()
+        flow.fetch_token(code=p.get("code", ""))
+    except Exception as e:
+        return _home(f"youtube auth failed: {type(e).__name__}: {e}", bad=True)
+
+    creds = flow.credentials
+    if not creds.refresh_token:
+        return _home("Google returned no refresh token — revoke the app under "
+                     "your Google account's third-party access and connect again",
+                     bad=True)
+    name = chosen
+    if not name:
+        try:
+            from googleapiclient.discovery import build
+            yt = build("youtube", "v3", credentials=creds)
+            items = yt.channels().list(part="snippet", mine=True).execute().get("items")
+            name = _safe_name(items[0]["snippet"]["title"] if items else "", "")
+        except Exception:
+            name = ""
+    name = name or "account"
+
+    os.makedirs(upload_youtube.TOKEN_DIR, exist_ok=True)
+    path = os.path.join(upload_youtube.TOKEN_DIR, f"token_{name}.pickle")
+    with open(path, "wb") as f:
+        pickle.dump(creds, f)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return _home(f"YouTube channel saved as {name} — add a matching "
+                 f"'{name}' row in the accounts dashboard so it can receive clips")
 
 
 # ---------------------------------------------------------------- posting
@@ -549,12 +641,23 @@ if __name__ == "__main__":
 
         # state expires
         old = _issue_state("tiktok")
-        _PENDING[old] = ("tiktok", time.time() - STATE_TTL - 1)
+        _PENDING[old] = ("tiktok", time.time() - STATE_TTL - 1, None)
         try:
             _take_state(old, "tiktok")
             raise AssertionError("expired state accepted")
         except ValueError:
             pass
+
+        # youtube: no client_secrets file means a readable refusal, not a stack trace
+        globals()["CLIENT_SECRETS"] = "/nonexistent/client_secrets.json"
+        r = c.get("/oauth/youtube/start?key=s3cret")
+        assert "bad=1" in r.headers["location"], r.headers
+        assert "client_secrets" in r.headers["location"], r.headers
+        assert "youtube" in c.get("/").text.lower()
+
+        # the chosen channel name rides along on the state, not on the URL
+        s2 = _issue_state("youtube", "Gaming")
+        assert _take_state(s2, "youtube") == "Gaming"
 
         # the posting screen carries every element the audit checks
         import tempfile
@@ -596,6 +699,7 @@ if __name__ == "__main__":
         import uvicorn
         if not CONNECT_KEY:
             print("WARNING: CLIPPER_CONNECT_KEY unset — the connect flow is closed")
-        print(f"redirect URIs to register:\n  {redirect_uri('tiktok')}\n"
-              f"  {redirect_uri('instagram')}")
+        print("redirect URIs to register:")
+        for platform in ("youtube", "tiktok", "instagram"):
+            print(f"  {redirect_uri(platform)}")
         uvicorn.run(app, host=HOST, port=PORT)

@@ -278,6 +278,17 @@ have working defaults.
 
 ## 7. VPS setup
 
+`install.sh` does the whole machine side and is idempotent:
+
+```bash
+sudo bash install.sh
+```
+
+Packages, the `clipper` service user, virtualenv, `/etc/clipper` at mode 700,
+systemd units, cron and nginx. It writes no credentials — those need a human,
+and the agent running the installer must stay out of `/etc/clipper`.
+[SETUP.md](SETUP.md) has the credential sourcing guide.
+
 ```bash
 python preflight.py     # ffmpeg, fonts, 9Router, cookies, session,
                         # plus transcribe and render speed against the hour budget
@@ -340,7 +351,7 @@ a run that does not need it. Every backend exposes the same three names:
 
 | Platform | Module | Credentials | State |
 |---|---|---|---|
-| YouTube | `upload_youtube` | `token_<name>.pickle` | live |
+| YouTube | `upload_youtube` | `token_<name>.pickle` | live; minted at `/oauth/youtube/start` |
 | TikTok | `upload_tiktok` | `tiktok_<name>.json` | draft mode works now; direct posting needs the audit |
 | Instagram | `upload_instagram` | `instagram_<name>.json` | needs App Review and public hosting |
 
