@@ -266,6 +266,8 @@ Discord messages, or commit messages.
 | `CLIPPER_MAX_FIX_ATTEMPTS` | `1` | attempts per fingerprint before escalation |
 | `CLIPPER_MAX_TICKETS_PER_DAY` | `3` | dev-agent ticket cap |
 | `CLIPPER_YT_ACCOUNT` | `Test` | fallback when category detection fails |
+| `CLIPPER_TIKTOK_DIRECT` | unset | `1` only after the TikTok audit passes |
+| `CLIPPER_PUBLIC_BASE` | unset | public HTTPS base for `out/`; required by Instagram |
 
 Render and dashboard knobs (`CLIPPER_FFMPEG`, `CLIPPER_CODEC`,
 `CLIPPER_PRESET`, `CLIPPER_BITRATE`, `CLIPPER_FPS`, `CLIPPER_THREADS`,
@@ -321,7 +323,65 @@ be automated; the bio has to be edited by hand.
 
 ---
 
-## 9. Known gaps
+## 9. Publishing backends
+
+`uploaders.py` is the single entry point, shaped like `fetch.ROUTES`:
+
+```python
+uploaders.upload(conn, platform, video_path, meta, account=None)
+uploaders.available_accounts(platform)
+uploaders.ready(platform)      # (bool, reason) — what is blocking this platform
+uploaders.deferrals()          # every backend's "try again later" exception
+```
+
+Backends are imported lazily, so a platform that is not configured cannot stop
+a run that does not need it. Every backend exposes the same three names:
+`upload`, `available_accounts`, `DailyLimitExceeded`.
+
+| Platform | Module | Credentials | State |
+|---|---|---|---|
+| YouTube | `upload_youtube` | `token_<name>.pickle` | live |
+| TikTok | `upload_tiktok` | `tiktok_<name>.json` | draft mode works now; direct posting needs the audit |
+| Instagram | `upload_instagram` | `instagram_<name>.json` | needs App Review and public hosting |
+
+### TikTok
+
+Two endpoints, and the difference decides whether a clip is worth anything.
+Draft (`/post/publish/inbox/video/init/`) lands in the creator's TikTok inbox
+and works before any audit — the creator writes the caption and taps post.
+Direct (`/post/publish/video/init/`) goes to the feed but needs the Content
+Posting audit; **until that passes TikTok forces every post to `SELF_ONLY`**, so
+it earns no views and burns the footage. `CLIPPER_TIKTOK_DIRECT` gates it, and
+`upload(direct=True)` raises with that explanation until it is set.
+
+Uploads use `FILE_UPLOAD` in a single chunk, which avoids the domain
+verification that `PULL_FROM_URL` requires. Access tokens last a day and are
+refreshed automatically; a dead refresh token raises with `invalid_grant` in the
+message, which `watchdog.classify` routes to `NEEDS_HUMAN`.
+
+### Instagram
+
+Three steps: create a container from a video URL, wait for `status_code` to
+reach `FINISHED`, then publish. **There is no file upload** — Meta's servers
+fetch the video themselves, so the clip must sit on public HTTPS at publish
+time:
+
+```
+location /clips/ { alias /opt/clipper/out/; }
+```
+
+with `CLIPPER_PUBLIC_BASE=https://your.host/clips`. The pipeline deletes the
+file after a confirmed upload, so nothing lingers on the public path.
+
+The daily cap is read from Meta's own `content_publishing_limit` endpoint
+rather than hardcoded, because the number differs per account.
+
+Reels also require an Instagram **Business** account — Creator accounts cannot
+publish through the API — and a clip between 5 and 90 seconds at 9:16.
+
+---
+
+## 10. Known gaps
 
 Not bugs — unbuilt work, listed so nobody rediscovers them as surprises.
 
@@ -332,12 +392,14 @@ Not bugs — unbuilt work, listed so nobody rediscovers them as surprises.
 | `platforms_required` not gated | Clippo campaigns want TikTok/IG; the pipeline publishes YouTube, so submissions get rejected. **Product decision, not a code fix.** |
 | `duration_type` ignored | `DURATION_RANGES` is hardcoded per platform |
 | Brief compliance is substring matching | `_wants_clean_mode` matches fixed Indonesian phrases; a reworded brief slips through. Better: one LLM compliance pass per campaign at crawl time, cached into `requirements_json`. |
-| No TikTok / Instagram uploader | both need weeks of platform app review before a single public post |
+| TikTok direct posting is off | `upload_tiktok.py` works today in draft mode; public posting waits on the Content Posting audit, and `CLIPPER_TIKTOK_DIRECT=1` turns it on afterwards |
+| Instagram needs public hosting | `upload_instagram.py` works once `CLIPPER_PUBLIC_BASE` serves `out/` over HTTPS, plus App Review for `instagram_business_content_publish` |
+| Pipeline still publishes to one platform | `PLATFORM = "youtube"` in `pipeline.py`; the registry accepts the other two, but nothing routes a campaign to them yet |
 | Clips stranded on `FAILED` tasks | files stay in `out/`; harmless, no automatic retry reaches them |
 
 ---
 
-## 10. Ground rules
+## 11. Ground rules
 
 - **No framework.** Plain modules, `__main__` self-checks, no test runner, no
   DI container, no plugin registry.

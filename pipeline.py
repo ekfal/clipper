@@ -19,6 +19,7 @@ import metadata
 import segments as selector
 import transcribe
 import upload_youtube
+import uploaders
 from clippo import ClippoAdapter, classify_source
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
@@ -209,8 +210,8 @@ def _upload_all(conn, task_id, rendered):
             conn.execute("UPDATE clips SET account=? WHERE clip_id=?", (account, clip_id))
             conn.commit()
         try:
-            res = upload_youtube.upload(conn, path, meta, account=account)
-        except upload_youtube.DailyLimitExceeded:
+            res = uploaders.upload(conn, PLATFORM, path, meta, account=account)
+        except uploaders.deferrals():
             conn.execute("UPDATE clips SET status='EDITED' WHERE clip_id=?", (clip_id,))
             conn.commit()
             raise
@@ -231,7 +232,7 @@ def process(conn, limit=TASKS_PER_RUN):
         try:
             process_task(conn, task)
             done += 1
-        except upload_youtube.DailyLimitExceeded:
+        except uploaders.deferrals():
             db.set_task_status(conn, task["task_id"], "DISCOVERED",
                                "daily upload limit; retry next run")
             break
