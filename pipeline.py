@@ -70,11 +70,58 @@ def _wants_clean_mode(reqs):
     return any(b in brief for b in banned)
 
 
+def _clip_path(task_id, video_id, start):
+    return os.path.join(OUT_DIR, f"t{task_id}_{video_id}_{int(start)}.mp4")
+
+
+def pending_clips(conn, task_id):
+    """Clips already rendered for this task and still waiting to be uploaded.
+
+    A task that ran out of daily upload slots comes back as DISCOVERED, so
+    without this it would re-download, re-pick (different, since the old
+    timestamps are now reserved) and re-render — stranding the finished clips
+    and their reservations forever. A row that can no longer be uploaded (file
+    deleted, or rendered before metadata was persisted) is dropped along with
+    its reservation, so the segment is free to be cut again.
+    """
+    out = []
+    for r in conn.execute(
+            """SELECT clip_id, video_id, start_ts, end_ts, platform, meta_json, account
+                 FROM clips
+                WHERE task_id=? AND status='EDITED' AND published_url IS NULL
+             ORDER BY clip_id""", (task_id,)).fetchall():
+        path = _clip_path(task_id, r["video_id"], r["start_ts"])
+        meta = json.loads(r["meta_json"] or "{}")
+        if os.path.exists(path) and meta.get("title"):
+            out.append((r["clip_id"], path, meta, r["account"]))
+            continue
+        conn.execute("DELETE FROM segment_usage WHERE video_id=? AND start_ts=?"
+                     " AND end_ts=? AND platform=?",
+                     (r["video_id"], r["start_ts"], r["end_ts"], r["platform"]))
+        conn.execute("DELETE FROM clips WHERE clip_id=?", (r["clip_id"],))
+        conn.commit()
+        if os.path.exists(path):
+            os.remove(path)
+    return out
+
+
 def process_task(conn, task):
     """Run one task through download -> ... -> published. Raises on failure."""
     task_id = task["task_id"]
     reqs = _requirements(conn, task["campaign_id"])
     os.makedirs(OUT_DIR, exist_ok=True)
+
+    # Check for somewhere to publish before spending a download + transcribe +
+    # render on a clip that would have nowhere to go.
+    allowed = upload_youtube.eligible_accounts(conn)
+    if not allowed:
+        raise upload_youtube.DailyLimitExceeded(
+            "no campaign_ready YouTube account under its daily post limit")
+
+    rendered = pending_clips(conn, task_id)
+    if rendered:
+        print(f"  resuming {len(rendered)} clip(s) rendered on an earlier run")
+        return _upload_all(conn, task_id, rendered)
 
     db.set_task_status(conn, task_id, "DOWNLOADING")
     videos = fetch.fetch(task["footage_source_type"], task["footage_url"], task_id)
@@ -120,24 +167,47 @@ def process_task(conn, task):
         # this segment was cut from; metadata only ever sees the segment
         if pick.get("hook"):
             meta["hook"] = pick["hook"]
-        out_path = os.path.join(OUT_DIR, f"t{task_id}_{video_id}_{int(start)}.mp4")
+        out_path = _clip_path(task_id, video_id, start)
         edit.render_clip(video_path, start, end, seg_words, out_path,
                          hook=meta["hook"], split_screen=False, bgm=allow_fx)
+        # route each clip to the eligible channel whose category fits its content
+        account, why = upload_youtube.detect_category(
+            seg_text, title=meta["title"], accounts=allowed,
+            default=upload_youtube.ACCOUNT)
+        # meta and account are persisted with the row so a run that dies before
+        # uploading can pick the clip up instead of re-rendering it
         cur = conn.execute(
-            """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id, status)
-               VALUES (?,?,?,?,?,?)""",
-            (task_id, start, end, PLATFORM, video_id, "EDITED"))
+            """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id,
+                                  status, meta_json, account)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (task_id, start, end, PLATFORM, video_id, "EDITED",
+             json.dumps(meta, ensure_ascii=False), account))
         conn.execute("INSERT INTO segment_usage VALUES (?,?,?,?)",
                      (video_id, start, end, PLATFORM))
         conn.commit()
-        # route each clip to the channel whose category fits its content
-        account, why = upload_youtube.detect_category(
-            seg_text, title=meta["title"], default=upload_youtube.ACCOUNT)
         print(f"  clip {int(start)}s -> account {account} ({why})")
         rendered.append((cur.lastrowid, out_path, meta, account))
 
+    return _upload_all(conn, task_id, rendered)
+
+
+def _upload_all(conn, task_id, rendered):
+    """Upload every rendered clip, then close the task."""
     db.set_task_status(conn, task_id, "UPLOADING")
     for clip_id, path, meta, account in rendered:
+        # slots fill as we go, so re-check the cap per clip rather than trusting
+        # the decision made back in EDITING
+        open_now = upload_youtube.eligible_accounts(conn)
+        if account not in open_now:
+            if not open_now:
+                conn.execute("UPDATE clips SET status='EDITED' WHERE clip_id=?", (clip_id,))
+                conn.commit()
+                raise upload_youtube.DailyLimitExceeded(
+                    f"{account} hit its daily post limit and no other account is open")
+            print(f"  {account} full, moving clip {clip_id} to {open_now[0]}")
+            account = open_now[0]
+            conn.execute("UPDATE clips SET account=? WHERE clip_id=?", (account, clip_id))
+            conn.commit()
         try:
             res = upload_youtube.upload(conn, path, meta, account=account)
         except upload_youtube.DailyLimitExceeded:
@@ -235,6 +305,13 @@ if __name__ == "__main__":
         print("crawl:", crawl(conn))
     elif "--process-only" in sys.argv:
         print("process:", process(conn))
+    elif "--submit-only" in sys.argv:
+        print("views synced:", upload_youtube.sync_views(conn))
+        print("submit:", submit_eligible(conn, dry_run="--dry-run" in sys.argv))
     else:
         print("crawl:", crawl(conn))
         print("process:", process(conn))
+        # a clip only becomes submittable once YouTube reports its views, so the
+        # count has to be refreshed before the threshold is applied
+        print("views synced:", upload_youtube.sync_views(conn))
+        print("submit:", submit_eligible(conn))
