@@ -100,8 +100,9 @@ FRAME_MODE = os.environ.get("CLIPPER_FRAME_MODE", "fill")
 FILL_HEIGHT_FRAC = 0.62
 
 # Where the captions sit relative to the footage:
-#   "below"  — the footage is shrunk and pushed up, captions live in the clear
-#              strip under it. Nothing is ever covered.
+#   "below"  — the footage is shrunk to the reference clip's proportion and
+#              stays centred; captions live in the clear strip under it.
+#              Nothing is ever covered.
 #   "inside" — captions sit on the footage (the reference look). The footage
 #              stays as large as frame_mode allows.
 # These cannot both be maximised: a 62%-tall video leaves no strip that is also
@@ -112,10 +113,13 @@ CAPTION_PLACE = os.environ.get("CLIPPER_CAPTION_PLACE", "below")
 # bottom 15% and right edge of the frame. Anything below this is at risk of
 # being covered by the app, so the caption lane has to end above it.
 PLATFORM_SAFE_BOTTOM = 0.82
-BELOW_HEIGHT_FRAC = 0.52   # footage height when captions go below it
-BELOW_VIDEO_TOP = 0.10     # footage top; bottom lands at 0.62
-BELOW_CAPTION_BOTTOM = 0.80  # caption block bottom, inside the safe area
-BELOW_HOOK_Y = 950         # hook card still rides on the footage, lower third
+# 40% centred is the proportion the reference clip uses throughout (measured
+# 42/39/33/40% across its shots, always centred on 50%). It also happens to
+# leave exactly enough room underneath for a caption lane.
+BELOW_HEIGHT_FRAC = 0.40     # footage height when captions go below it
+BELOW_CAPTION_BOTTOM = 0.81  # caption block bottom, inside the safe area
+BELOW_MAX_LINES = 2          # the lane fits two lines, not three
+BELOW_HOOK_Y = 1100          # hook card still rides on the footage, lower third
 
 
 def _random_asset(dirpath, exts):
@@ -339,7 +343,7 @@ def group_phrases(words, gap_split=PHRASE_GAP_SPLIT,
 
 
 def _phrase_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=PHRASE_Y_FRAC,
-                  centred=True):
+                  centred=True, max_lines=PHRASE_MAX_LINES):
     """Phrase captions (reference style): whole lines in one colour, left
     aligned, heavy black stroke, sitting inside the footage band.
 
@@ -360,7 +364,7 @@ def _phrase_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=PHRASE_Y_F
         CANVAS_W - int(PHRASE_X_FRAC * CANVAS_W) - PADDING)
     overlays = []
 
-    for ph in group_phrases(words):
+    for ph in group_phrases(words, max_lines=max_lines):
         plain = [re.sub(r"[.,!?]", "", w["word"].upper()) for line in ph["lines"] for w in line]
         color = (PHRASE_ACCENT
                  if accent and any(p.lower() in accent for p in plain)
@@ -463,9 +467,10 @@ def render_clip(video_path, start, end, words, out_path, *,
     bgm accepts a track path (what pipeline.py passes, chosen by bgm.py from
     the clip's mood), True for a random pick, or False for none.
 
-    caption_place="below" (default) shrinks the footage and pushes it up so the
-    captions sit in a clear strip underneath, covering nothing; "inside" keeps
-    the footage as large as frame_mode allows and lays the captions over it.
+    caption_place="below" (default) sizes the footage like the reference clip
+    (40% of the canvas, centred) so the captions fit in a clear strip beneath
+    it, covering nothing; "inside" keeps the footage as large as frame_mode
+    allows and lays the captions over it.
 
     frame_mode="fill" (default) crops the footage to canvas width at
     FILL_HEIGHT_FRAC of the canvas height; "fit" scales the whole frame in
@@ -482,7 +487,8 @@ def render_clip(video_path, start, end, words, out_path, *,
         if caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,
-                y_frac=BELOW_CAPTION_BOTTOM if below else PHRASE_Y_FRAC)
+                y_frac=BELOW_CAPTION_BOTTOM if below else PHRASE_Y_FRAC,
+                max_lines=BELOW_MAX_LINES if below else PHRASE_MAX_LINES)
         else:
             sub_y = SUB_Y if split_screen else CLEAN_SUB_Y
             if below:
@@ -544,8 +550,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                 chains.append(f"[mnsrc]scale=-2:{h},"
                               f"scale=w='max(iw,{CANVAS_W})':h=-2,"
                               f"crop={CANVAS_W}:min(ih\\,{h})[mn]")
-        y_expr = f"{int(BELOW_VIDEO_TOP * CANVAS_H)}" if below else "(H-h)/2"
-        chains.append(f"[bg][mn]overlay=(W-w)/2:{y_expr}[v0]")
+        chains.append("[bg][mn]overlay=(W-w)/2:(H-h)/2[v0]")
 
         for i, ov in enumerate(overlays):
             src_label = f"[v{i}]"
@@ -610,11 +615,12 @@ if __name__ == "__main__":
     # worst case (a full three-line phrase) — this is the whole point of the mode
     import tempfile as _tf
     _long = [{"word": f"KATAPANJANG{i}", "start": i * 0.2, "end": i * 0.2 + 0.15}
-             for i in range(PHRASE_MAX_WORDS * PHRASE_MAX_LINES)]
-    _ov = _phrase_layer(_long, 0, _tf.mkdtemp(), y_frac=BELOW_CAPTION_BOTTOM)
+             for i in range(PHRASE_MAX_WORDS * BELOW_MAX_LINES)]
+    _ov = _phrase_layer(_long, 0, _tf.mkdtemp(), y_frac=BELOW_CAPTION_BOTTOM,
+                        max_lines=BELOW_MAX_LINES)
     _top = min(o.y for o in _ov)
     _bot = max(o.y + Image.open(o.path).height for o in _ov)
-    _video_bottom = (BELOW_VIDEO_TOP + BELOW_HEIGHT_FRAC) * CANVAS_H
+    _video_bottom = (0.5 + BELOW_HEIGHT_FRAC / 2) * CANVAS_H
     assert _top > _video_bottom, f"caption {_top} overlaps footage ending {_video_bottom}"
     assert _bot <= PLATFORM_SAFE_BOTTOM * CANVAS_H, (
         f"caption bottom {_bot} runs into the platform UI zone")
