@@ -122,7 +122,8 @@ def process_task(conn, task):
             meta["hook"] = pick["hook"]
         out_path = os.path.join(OUT_DIR, f"t{task_id}_{video_id}_{int(start)}.mp4")
         edit.render_clip(video_path, start, end, seg_words, out_path,
-                         hook=meta["hook"], split_screen=False, bgm=allow_fx)
+                         hook=meta["hook"], split_screen=False, bgm=allow_fx,
+                         accent_words=meta.get("punchline_words") or ())
         cur = conn.execute(
             """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id, status)
                VALUES (?,?,?,?,?,?)""",

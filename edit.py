@@ -43,6 +43,13 @@ FONT_PATH = os.environ.get(
     r"C:\Windows\Fonts\arialbd.ttf" if sys.platform == "win32"
     else "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 )
+# Regular weight, for the un-emphasised half of a hook line. The reference
+# style mixes both in one sentence, so the pair must be the same family.
+FONT_PATH_REGULAR = os.environ.get(
+    "CLIPPER_FONT_REGULAR",
+    r"C:\Windows\Fonts\arial.ttf" if sys.platform == "win32"
+    else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
 BG_DIR = os.environ.get("CLIPPER_BG_DIR", os.path.join(_PARENT, "background_video"))
 BGM_DIR = os.environ.get("CLIPPER_BGM_DIR", os.path.join(_PARENT, "background_music"))
 CODEC = os.environ.get("CLIPPER_CODEC", "libx264")
@@ -56,6 +63,7 @@ BGM_VOLUME = 0.1
 
 CANVAS_W, CANVAS_H = 1080, 1920
 BLUR_SIGMA = 28.0   # background blur strength (full-res equivalent)
+BG_DARKEN = -0.12   # blurred fill is dimmed just enough to sit back
 BLUR_SCALE = 0.25   # blur is computed at this scale, then upscaled back
 SUB_Y = 1500
 FONT_SIZE = 60
@@ -63,6 +71,23 @@ SPACING = 12
 PADDING = 40
 STROKE = 5
 ACTIVE_COLOR = "#87CEFA"
+
+# ---- phrase captions (reference style) -------------------------------------
+# Whole phrases in one colour instead of a per-word highlight: gold by default,
+# magenta for the beat the model marks as the punchline. Heavy black stroke is
+# what keeps them legible over any footage.
+PHRASE_COLOR = "#FFD24A"
+PHRASE_ACCENT = "#FF3FA4"
+PHRASE_FONT_SIZE = 54
+PHRASE_STROKE = 6
+PHRASE_LINE_GAP = 6
+PHRASE_MAX_WORDS = 3      # words per line
+PHRASE_MAX_LINES = 3      # lines per phrase before it is flushed
+PHRASE_GAP_SPLIT = 0.45   # a pause this long ends the phrase
+PHRASE_X_FRAC = 0.09      # left margin, fraction of canvas width
+PHRASE_Y_FRAC = 0.61      # block BOTTOM, keeps it inside the footage band
+# "phrase" (reference look) or "karaoke" (per-word highlight, PRD §3.6)
+CAPTION_STYLE = os.environ.get("CLIPPER_CAPTION_STYLE", "phrase")
 
 
 def _random_asset(dirpath, exts):
@@ -144,61 +169,196 @@ def _mixed_text_image(text, font, fill, stroke_width=0):
 
 
 HOOK_Y = 300          # hook block top, centered style (split-screen mode)
-CLEAN_HOOK_Y = 1170   # hook block top, reference style (full-frame mode)
+CLEAN_HOOK_Y = 1460   # hook block top, reference style (lower third)
 CLEAN_SUB_Y = 1040    # karaoke line in full-frame mode (mid-frame, above hook)
 HOOK_X_LEFT = 44      # left margin for reference-style boxes
-HOOK_FONT_SIZE = 58
+HOOK_FONT_SIZE = 56
 HOOK_DUR = 3.0        # seconds the hook stays on screen
-HOOK_MAX_CHARS = 22   # wrap width per boxed line
-QUOTE_TEAL = "#3EC6A8"
+HOOK_MAX_CHARS = 26   # wrap width per boxed line
+HOOK_PAD_X, HOOK_PAD_Y = 26, 18
 
 
-def _quote_icon(tmp_dir, h=74):
-    """Small teal rounded box with white quote marks (reference style)."""
-    img = Image.new("RGBA", (int(h * 1.25), h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, img.width - 1, img.height - 1], radius=12, fill=QUOTE_TEAL)
+def _parse_emphasis(text):
+    """Split "plain **bold** plain" into [(word, is_bold)] tokens.
+
+    The reference style bolds only the loaded half of a hook sentence and
+    leaves the connective words regular, which is what makes it read like a
+    headline instead of a caption. metadata.py emits the ** markers.
+    """
+    tokens, bold = [], False
+    for chunk in re.split(r"(\*\*)", text.strip()):
+        if chunk == "**":
+            bold = not bold
+            continue
+        for word in chunk.split():
+            tokens.append((word, bold))
+    return tokens
+
+
+def _wrap_tokens(tokens, max_chars=HOOK_MAX_CHARS):
+    """Greedy wrap of (word, bold) tokens into lines, emphasis preserved."""
+    lines, cur, width = [], [], 0
+    for word, bold in tokens:
+        add = len(word) + (1 if cur else 0)
+        if cur and width + add > max_chars:
+            lines.append(cur)
+            cur, width = [], 0
+            add = len(word)
+        cur.append((word, bold))
+        width += add
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _rich_line_image(line, bold_font, reg_font, fill="black"):
+    """One hook line whose words may switch weight. Returns an RGBA image."""
+    runs, buf, cur_bold = [], [], line[0][1]
+    for word, bold in line:
+        if bold != cur_bold:
+            runs.append((" ".join(buf), cur_bold))
+            buf, cur_bold = [], bold
+        buf.append(word)
+    runs.append((" ".join(buf), cur_bold))
+
+    # _mixed_text_image pads each tile, so advance by the VISUAL width and let
+    # the padding overlap — otherwise every weight switch reads as a double
+    # space. Same trick the karaoke layer uses.
+    pad = 8
+    tiles, widths = [], []
+    for text, bold in runs:
+        img, vis_w = _mixed_text_image(text, bold_font if bold else reg_font, fill)
+        tiles.append(img)
+        widths.append(vis_w)
+    space = reg_font.getlength(" ") if hasattr(reg_font, "getlength") else HOOK_FONT_SIZE * 0.3
+    ink_w = sum(widths) + space * (len(tiles) - 1)
+    height = max(t.height for t in tiles)
+    img = Image.new("RGBA", (int(ink_w) + pad * 2, height), (0, 0, 0, 0))
+    x = 0.0
+    for t, w in zip(tiles, widths):
+        img.paste(t, (int(x), (height - t.height) // 2), t)
+        x += w + space
+    return img.crop((pad, 0, pad + int(ink_w), height))
+
+
+def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False):
+    """Visual hook — ONE white box behind every line, black text.
+
+    The reference draws a single continuous card rather than a stack of
+    per-line boxes, so the ragged right edge of the wrap stays inside one
+    rectangle. left=True hugs HOOK_X_LEFT, otherwise the card is centered.
+    Returns a list of Overlay specs (always exactly one).
+    """
     try:
-        f = ImageFont.truetype(FONT_PATH, int(h * 1.1))
+        bold_font = ImageFont.truetype(FONT_PATH, HOOK_FONT_SIZE)
     except OSError:
-        f = ImageFont.load_default()
-    q = "“"  # left double quote
-    bbox = f.getbbox(q)
-    d.text(((img.width - (bbox[2] - bbox[0])) / 2 - bbox[0],
-            (img.height - (bbox[3] - bbox[1])) / 2 - bbox[1] + h * 0.12),
-           q, font=f, fill="white")
-    path = os.path.join(tmp_dir, _name("q"))
-    img.save(path)
-    return path
-
-
-def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, icon=False):
-    """Visual hook — stacked white boxes, black bold text (Hormozi style).
-    left=True hugs HOOK_X_LEFT with a teal quote icon above (reference style);
-    otherwise centered. Returns list of Overlay specs."""
-    import textwrap
+        bold_font = ImageFont.load_default()
     try:
-        font = ImageFont.truetype(FONT_PATH, HOOK_FONT_SIZE)
+        reg_font = ImageFont.truetype(FONT_PATH_REGULAR, HOOK_FONT_SIZE)
+    except OSError:
+        reg_font = bold_font
+
+    lines = _wrap_tokens(_parse_emphasis(text))
+    if not lines:
+        return []
+    rendered = [_rich_line_image(l, bold_font, reg_font) for l in lines]
+    inner_w = max(r.width for r in rendered)
+    inner_h = sum(r.height for r in rendered) + HOOK_PAD_Y // 2 * (len(rendered) - 1)
+
+    card = Image.new("RGBA", (inner_w + HOOK_PAD_X * 2, inner_h + HOOK_PAD_Y * 2),
+                     (255, 255, 255, 255))
+    cy = HOOK_PAD_Y
+    for r in rendered:
+        card.paste(r, (HOOK_PAD_X, cy), r)
+        cy += r.height + HOOK_PAD_Y // 2
+
+    path = os.path.join(tmp_dir, _name("h"))
+    card.save(path)
+    x = HOOK_X_LEFT if left else (CANVAS_W - card.width) // 2
+    return [Overlay(path, int(x), int(y), 0.0, dur)]
+
+
+def group_phrases(words, gap_split=PHRASE_GAP_SPLIT,
+                  max_words=PHRASE_MAX_WORDS, max_lines=PHRASE_MAX_LINES):
+    """Group a word list into caption phrases, split on natural pauses.
+
+    A phrase ends where the speaker pauses (>= gap_split seconds) or once it
+    fills max_words * max_lines words — so a caption change lands on a beat in
+    the speech rather than every third word.
+    Returns [{start, end, lines: [[word, ...], ...]}].
+    """
+    phrases, cur = [], []
+    limit = max_words * max_lines
+
+    def flush():
+        if not cur:
+            return
+        chunk = list(cur)
+        phrases.append({
+            "start": chunk[0]["start"],
+            "end": chunk[-1]["end"],
+            "lines": [chunk[i:i + max_words] for i in range(0, len(chunk), max_words)],
+        })
+        cur.clear()
+
+    for i, w in enumerate(words):
+        cur.append(w)
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        if len(cur) >= limit or nxt is None or nxt["start"] - w["end"] >= gap_split:
+            flush()
+    flush()
+    return phrases
+
+
+def _phrase_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=PHRASE_Y_FRAC):
+    """Phrase captions (reference style): whole lines in one colour, left
+    aligned, heavy black stroke, sitting inside the footage band.
+
+    y_frac is the BOTTOM of the block: captions grow upward, so a one-line and
+    a three-line phrase share a baseline and neither can spill past the band on
+    a wide source.
+
+    One PNG per phrase instead of one per word — a 60s clip drops from ~150
+    overlay inputs to ~25, which is most of the render cost.
+    """
+    try:
+        font = ImageFont.truetype(FONT_PATH, PHRASE_FONT_SIZE)
     except OSError:
         font = ImageFont.load_default()
-    lines = textwrap.wrap(text.strip(), width=HOOK_MAX_CHARS)
+    accent = {a.lower().strip(".,!?") for a in accent_words if a}
+    pad = PHRASE_STROKE + 8
+    max_w = CANVAS_W - int(PHRASE_X_FRAC * CANVAS_W) - PADDING
     overlays = []
-    pad_x, pad_y, gap = 18, 10, 8
-    if icon:
-        ip = _quote_icon(tmp_dir)
-        iw, ih = Image.open(ip).size
-        overlays.append(Overlay(ip, HOOK_X_LEFT if left else (CANVAS_W - iw) // 2,
-                                y - ih - 12, 0.0, dur))
-    for line in lines:
-        content, _ = _mixed_text_image(line, font, "black")
-        img = Image.new("RGBA", (content.width + pad_x * 2, content.height + pad_y * 2),
-                        (255, 255, 255, 255))
-        img.paste(content, (pad_x, pad_y), content)
-        path = os.path.join(tmp_dir, _name("h"))
-        img.save(path)
-        x = HOOK_X_LEFT if left else (CANVAS_W - img.width) // 2
-        overlays.append(Overlay(path, int(x), int(y), 0.0, dur))
-        y += img.height + gap
+
+    for ph in group_phrases(words):
+        plain = [re.sub(r"[.,!?]", "", w["word"].upper()) for line in ph["lines"] for w in line]
+        color = (PHRASE_ACCENT
+                 if accent and any(p.lower() in accent for p in plain)
+                 else PHRASE_COLOR)
+        tiles = []
+        for line in ph["lines"]:
+            text = " ".join(re.sub(r"[.,!?]", "", w["word"].upper()) for w in line)
+            img, _ = _mixed_text_image(text, font, color, stroke_width=PHRASE_STROKE)
+            if img.width > max_w:  # very long word — shrink the whole line
+                s = max_w / img.width
+                img = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
+            tiles.append(img)
+        block_w = max(t.width for t in tiles)
+        block_h = sum(t.height for t in tiles) + PHRASE_LINE_GAP * (len(tiles) - 1)
+        block = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
+        cy = 0
+        for t in tiles:
+            block.paste(t, (0, cy), t)
+            cy += t.height + PHRASE_LINE_GAP
+        path = os.path.join(tmp_dir, _name("p"))
+        block.save(path)
+
+        t_start = max(0.0, ph["start"] - clip_start)
+        t_end = max(t_start + 0.3, ph["end"] - clip_start)
+        overlays.append(Overlay(path,
+                                int(PHRASE_X_FRAC * CANVAS_W) - pad,
+                                int(y_frac * CANVAS_H - block_h),
+                                t_start, t_end))
     return overlays
 
 
@@ -254,29 +414,38 @@ def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
 
 def render_clip(video_path, start, end, words, out_path, *,
                 hook=None, split_screen=False, bgm=True, fps=FPS,
-                bitrate=BITRATE, preset=PRESET, threads=THREADS):
-    """Render one vertical clip [start, end) with karaoke captions.
+                bitrate=BITRATE, preset=PRESET, threads=THREADS,
+                caption_style=CAPTION_STYLE, accent_words=()):
+    """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
-    to the segment. hook: headline text shown as boxed overlay for the first
-    seconds (visual hook).
+    to the segment. hook: headline text shown as a boxed overlay for the first
+    seconds; **double asterisks** inside it render bold, the rest regular.
 
-    Default = full-frame (reference style): footage fills the canvas, captions
-    mid-frame, hook as left-aligned quote boxes lower-third. split_screen=True
-    keeps the legacy gameplay-bg layout (per-campaign toggle, PRD §3.6).
+    caption_style="phrase" (default) draws whole phrases in one colour, left
+    aligned inside the footage band — the reference look, and ~6x fewer overlay
+    inputs. caption_style="karaoke" keeps the per-word highlight (PRD §3.6).
+    accent_words tints the phrase carrying the punchline (see metadata.py).
+
+    Default layout = full-frame: the footage is fitted whole into the canvas
+    (never cropped) over a blurred copy of itself. split_screen=True keeps the
+    legacy gameplay-bg layout (per-campaign toggle, PRD §3.6).
     Returns out_path.
     """
     dur = end - start
     tmp_dir = os.path.join(_BASE, f"temp_subs_{uuid.uuid4().hex[:8]}")
     os.makedirs(tmp_dir, exist_ok=True)
     try:
-        sub_y = SUB_Y if split_screen else CLEAN_SUB_Y
-        overlays = _karaoke_layer(words, start, tmp_dir, sub_y=sub_y)
+        if caption_style == "phrase" and not split_screen:
+            overlays = _phrase_layer(words, start, tmp_dir, accent_words=accent_words)
+        else:
+            sub_y = SUB_Y if split_screen else CLEAN_SUB_Y
+            overlays = _karaoke_layer(words, start, tmp_dir, sub_y=sub_y)
         if hook:
             overlays += _hook_layer(
                 hook, tmp_dir, min(HOOK_DUR, dur),
                 y=HOOK_Y if split_screen else CLEAN_HOOK_Y,
-                left=not split_screen, icon=not split_screen)
+                left=not split_screen)
 
         bg_video = _random_asset(BG_DIR, (".mp4", ".mov", ".webm")) if split_screen else None
         bgm_path = _random_asset(BGM_DIR, (".mp3", ".wav", ".m4a")) if bgm else None
@@ -304,9 +473,12 @@ def render_clip(video_path, start, end, words, out_path, *,
             # reference style: the footage itself, blurred, fills the frame
             chains.append(f"[0:v]split=2[bgsrc][mnsrc]")
             chains.append(f"[bgsrc]{cover},gblur=sigma={BLUR_SIGMA},"
-                          f"eq=brightness=-0.20[bg]")
-            chains.append(f"[mnsrc]scale=-2:{int(CANVAS_H * 0.62)},"
-                          f"crop=min(iw\\,{CANVAS_W}):ih[mn]")
+                          f"eq=brightness={BG_DARKEN}[bg]")
+            # fit, never crop: a 16:9 or 4:3 source keeps its full width and
+            # lands as a centred band, which is what the reference style is.
+            chains.append(f"[mnsrc]scale=w={CANVAS_W}:h={CANVAS_H}:"
+                          f"force_original_aspect_ratio=decrease:"
+                          f"force_divisible_by=2[mn]")
         chains.append("[bg][mn]overlay=(W-w)/2:(H-h)/2[v0]")
 
         for i, ov in enumerate(overlays):
@@ -347,6 +519,29 @@ def render_clip(video_path, start, end, words, out_path, *,
 
 
 if __name__ == "__main__":
+    # Logic self-check first (no ffmpeg, no footage), then an optional render.
+    assert _parse_emphasis("**Nekat!! Berani** Ngomong Ke **Mantan**") == [
+        ("Nekat!!", True), ("Berani", True), ("Ngomong", False), ("Ke", False),
+        ("Mantan", True)], _parse_emphasis("**a** b")
+    assert _parse_emphasis("tanpa penanda") == [("tanpa", False), ("penanda", False)]
+    lines = _wrap_tokens([(w, False) for w in "satu dua tiga empat lima".split()],
+                         max_chars=10)
+    assert ["".join(w for w, _ in l) for l in lines] == ["satudua", "tigaempat", "lima"], lines
+
+    # phrases break on a pause, and cap at max_words * max_lines
+    ws = [{"word": f"w{i}", "start": i * 0.3, "end": i * 0.3 + 0.25} for i in range(4)]
+    ws += [{"word": f"x{i}", "start": 3.0 + i * 0.3, "end": 3.0 + i * 0.3 + 0.25}
+           for i in range(2)]
+    ph = group_phrases(ws)
+    assert len(ph) == 2, ph                       # the 2s pause splits them
+    assert [w["word"] for l in ph[0]["lines"] for w in l] == ["w0", "w1", "w2", "w3"]
+    assert len(ph[0]["lines"]) == 2, ph[0]["lines"]        # 3 words per line
+    assert ph[1]["start"] == 3.0 and ph[0]["end"] == ws[3]["end"]
+    dense = [{"word": f"d{i}", "start": i * 0.2, "end": i * 0.2 + 0.15} for i in range(20)]
+    assert all(sum(len(l) for l in p["lines"]) <= PHRASE_MAX_WORDS * PHRASE_MAX_LINES
+               for p in group_phrases(dense))
+    print("edit.py logic self-check OK")
+
     # Smoke: render 5s from a fetched video, both modes. Needs media/3 present.
     import json
     vid = os.path.join(_BASE, "media", "3", "IJE50gujMTg.mp4")

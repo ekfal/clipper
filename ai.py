@@ -5,6 +5,7 @@ Config from clipper/.env (NINEROUTER_BASE_URL, NINEROUTER_API_KEY).
 """
 import json
 import os
+import time
 
 import requests
 
@@ -28,26 +29,48 @@ BASE_URL = os.environ.get("NINEROUTER_BASE_URL", "http://localhost:20128/v1")
 API_KEY = os.environ.get("NINEROUTER_API_KEY", "")
 MODEL = os.environ.get("NINEROUTER_MODEL", "ds/deepseek-v4-pro")
 TIMEOUT = 120
+# PRD §5 (rate-limit awareness): a tunnel hiccup or a 5xx from the router is
+# transient, and one of them used to fail a whole task. Retry with backoff;
+# 4xx is a bad request and is raised straight away.
+RETRIES = int(os.environ.get("NINEROUTER_RETRIES", "3"))
+BACKOFF = float(os.environ.get("NINEROUTER_BACKOFF", "2.0"))
+
+
+def _post(system, user, model, temperature):
+    """POST one completion, retrying transport errors and 5xx with backoff."""
+    last = None
+    for attempt in range(RETRIES):
+        try:
+            resp = requests.post(
+                f"{BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": temperature,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=TIMEOUT,
+            )
+        except requests.RequestException as e:
+            last = e
+        else:
+            if resp.status_code < 500:
+                resp.raise_for_status()
+                return resp
+            last = requests.HTTPError(f"{resp.status_code} from router")
+        if attempt < RETRIES - 1:
+            time.sleep(BACKOFF * (2 ** attempt))
+    raise last
 
 
 def chat_json(system, user, model=MODEL, temperature=0.7):
     """One chat completion that must return a JSON object. Returns parsed dict.
     Raises on transport error or unparseable output — caller decides fallback."""
-    resp = requests.post(
-        f"{BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": temperature,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
+    resp = _post(system, user, model, temperature)
     # 9Router labels the reply text/event-stream with no charset, so requests
     # would guess ISO-8859-1 and mangle emoji — decode UTF-8 explicitly. It
     # also appends "data: [DONE]" after the JSON body, so raw_decode takes the
