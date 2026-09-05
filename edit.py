@@ -438,6 +438,9 @@ def render_clip(video_path, start, end, words, out_path, *,
     inputs. caption_style="karaoke" keeps the per-word highlight (PRD §3.6).
     accent_words tints the phrase carrying the punchline (see metadata.py).
 
+    bgm accepts a track path (what pipeline.py passes, chosen by bgm.py from
+    the clip's mood), True for a random pick, or False for none.
+
     frame_mode="fill" (default) crops the footage to canvas width at
     FILL_HEIGHT_FRAC of the canvas height; "fit" scales the whole frame in
     instead, losing nothing but showing the subject smaller. Either way the
@@ -461,7 +464,14 @@ def render_clip(video_path, start, end, words, out_path, *,
                 left=not split_screen)
 
         bg_video = _random_asset(BG_DIR, (".mp4", ".mov", ".webm")) if split_screen else None
-        bgm_path = _random_asset(BGM_DIR, (".mp3", ".wav", ".m4a")) if bgm else None
+        # bgm: a path chosen by bgm.py (production), or True for a random pick
+        # — the latter is for the smoke test only, it is not reproducible.
+        if isinstance(bgm, str):
+            bgm_path = bgm
+        elif bgm:
+            bgm_path = _random_asset(BGM_DIR, (".mp3", ".wav", ".m4a"))
+        else:
+            bgm_path = None
 
         inputs = ["-ss", f"{start}", "-t", f"{dur}", "-i", os.path.abspath(video_path)]
         if bg_video:

@@ -7,6 +7,7 @@ hashtag placement (YouTube: tags field + #Shorts in description).
 import re
 
 import ai
+import bgm
 
 SYSTEM = """You are a viral short-form video strategist for Indonesian audiences.
 Output strictly a JSON object, no markdown. All text fields in casual Indonesian
@@ -33,6 +34,9 @@ Return JSON keys:
 5. "punchline": kutip PERSIS 3-6 kata dari transkrip yang jadi puncak/kejutan
    segmen ini. Dipakai untuk mewarnai caption di momen itu. Kalau tidak ada
    yang menonjol, kembalikan string kosong.
+6. "mood": SATU kata dari daftar ini yang paling menggambarkan rasa segmen —
+   {moods}. Dipakai untuk memilih musik latar, jadi pilih berdasarkan nada
+   bicara dan isi, bukan topiknya semata.
 """
 
 
@@ -52,6 +56,7 @@ def generate(transcript, requirements, platform="youtube"):
                 transcript=transcript[:4000],
                 hashtags=" ".join(mandatory) or "(tidak ada)",
                 brief=(requirements.get("brief") or "")[:1500],
+                moods=", ".join(bgm.MOODS),
             ),
         )
     except Exception as e:
@@ -82,8 +87,11 @@ def generate(transcript, requirements, platform="youtube"):
     spoken = {w.strip(".,!?").lower() for w in transcript.split()}
     punchline = [w.strip(".,!?") for w in str(out.get("punchline") or "").split()
                  if w.strip(".,!?").lower() in spoken]
+    mood = str(out.get("mood") or "").strip().lower()
+    if mood not in bgm.MOODS:
+        mood = bgm.DEFAULT_MOOD
     return {"hook": hook, "title": title, "description": desc,
-            "youtube_tags": tags[:15], "punchline_words": punchline}
+            "youtube_tags": tags[:15], "punchline_words": punchline, "mood": mood}
 
 
 if __name__ == "__main__":
@@ -92,6 +100,7 @@ if __name__ == "__main__":
     ai.chat_json = lambda *a, **k: {
         "hook": "**Gila, 25 Juta Sebulan** Dari Klip! 💰",
         "punchline": "soal cuan tidak-ada-di-transkrip",
+        "mood": "HYPE",
         "title": "Rahasia Cuan Clipper",
         "description": "Simak sampai habis. Komen pendapatmu!",
         "youtube_tags": ["clipper", "#cuan", "shorts"],
@@ -102,6 +111,10 @@ if __name__ == "__main__":
         assert "**" in m["hook"], m["hook"]           # emphasis markers survive
         # hallucinated punchline words are dropped, spoken ones kept
         assert m["punchline_words"] == ["soal", "cuan"], m["punchline_words"]
+        assert m["mood"] == "hype", m["mood"]        # case-normalised
+        # an unknown mood falls back rather than reaching bgm.pick as garbage
+        ai.chat_json = lambda *a, **k: {"mood": "galau"}
+        assert generate("x", {"hashtags": []})["mood"] == bgm.DEFAULT_MOOD
         assert "#Shorts" in m["description"], m
         assert m["youtube_tags"][1] == "cuan"  # lstrip #
         assert "💰" in m["hook"]

@@ -12,6 +12,7 @@ import json
 import os
 import traceback
 
+import bgm as bgm_lib
 import db
 import edit
 import fetch
@@ -110,7 +111,8 @@ def process_task(conn, task):
     # slice-1 renders reference style everywhere; a brief that bans visual
     # additions also disables BGM (PRD §3.6 compliance scan)
     allow_fx = not _wants_clean_mode(reqs)
-    rendered = []  # (clip_id, path, meta)
+    rendered = []  # (clip_id, path, meta, account)
+    used_tracks = []  # sibling clips of this task should not share a track
     for pick in picks:
         start, end = pick["start"], pick["end"]
         seg_words = selector.words_in(words, start, end)
@@ -121,8 +123,25 @@ def process_task(conn, task):
         if pick.get("hook"):
             meta["hook"] = pick["hook"]
         out_path = os.path.join(OUT_DIR, f"t{task_id}_{video_id}_{int(start)}.mp4")
+
+        # BGM by mood. The key is the clip's identity, so a re-render after a
+        # retry lands on the same track (PRD §5) instead of a random one.
+        track = None
+        if allow_fx:
+            track, why = bgm_lib.pick(meta.get("mood"),
+                                      key=f"{video_id}:{int(start)}",
+                                      exclude=used_tracks)
+            print(f"  clip {int(start)}s -> bgm {why}")
+            if track:
+                used_tracks.append(track["path"])
+                # royalty-free is not attribution-free; when the manifest names
+                # a credit line it has to reach the published description
+                if track["attribution"] and track["attribution"] not in meta["description"]:
+                    meta["description"] += f"\n\n{track['attribution']}"
+
         edit.render_clip(video_path, start, end, seg_words, out_path,
-                         hook=meta["hook"], split_screen=False, bgm=allow_fx,
+                         hook=meta["hook"], split_screen=False,
+                         bgm=track["path"] if track else False,
                          accent_words=meta.get("punchline_words") or ())
         cur = conn.execute(
             """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id, status)
