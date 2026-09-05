@@ -88,6 +88,16 @@ PHRASE_X_FRAC = 0.09      # left margin, fraction of canvas width
 PHRASE_Y_FRAC = 0.61      # block BOTTOM, keeps it inside the footage band
 # "phrase" (reference look) or "karaoke" (per-word highlight, PRD §3.6)
 CAPTION_STYLE = os.environ.get("CLIPPER_CAPTION_STYLE", "phrase")
+# How the footage sits on the canvas:
+#   "fill" — scale to FILL_HEIGHT_FRAC of the canvas and crop to width. The
+#            subject is bigger and the frame reads punchier on a phone, at the
+#            cost of whatever leaves the left and right edges.
+#   "fit"  — scale the whole frame in, never cropping; band height follows the
+#            source aspect. Nothing is lost, the subject is smaller.
+# "fill" is the default: for talking-head footage the tighter framing wins, and
+# a centred speaker survives the side crop.
+FRAME_MODE = os.environ.get("CLIPPER_FRAME_MODE", "fill")
+FILL_HEIGHT_FRAC = 0.62
 
 
 def _random_asset(dirpath, exts):
@@ -415,7 +425,8 @@ def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
 def render_clip(video_path, start, end, words, out_path, *,
                 hook=None, split_screen=False, bgm=True, fps=FPS,
                 bitrate=BITRATE, preset=PRESET, threads=THREADS,
-                caption_style=CAPTION_STYLE, accent_words=()):
+                caption_style=CAPTION_STYLE, accent_words=(),
+                frame_mode=FRAME_MODE):
     """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -427,8 +438,10 @@ def render_clip(video_path, start, end, words, out_path, *,
     inputs. caption_style="karaoke" keeps the per-word highlight (PRD §3.6).
     accent_words tints the phrase carrying the punchline (see metadata.py).
 
-    Default layout = full-frame: the footage is fitted whole into the canvas
-    (never cropped) over a blurred copy of itself. split_screen=True keeps the
+    frame_mode="fill" (default) crops the footage to canvas width at
+    FILL_HEIGHT_FRAC of the canvas height; "fit" scales the whole frame in
+    instead, losing nothing but showing the subject smaller. Either way the
+    footage sits over a blurred copy of itself. split_screen=True keeps the
     legacy gameplay-bg layout (per-campaign toggle, PRD §3.6).
     Returns out_path.
     """
@@ -474,11 +487,20 @@ def render_clip(video_path, start, end, words, out_path, *,
             chains.append(f"[0:v]split=2[bgsrc][mnsrc]")
             chains.append(f"[bgsrc]{cover},gblur=sigma={BLUR_SIGMA},"
                           f"eq=brightness={BG_DARKEN}[bg]")
-            # fit, never crop: a 16:9 or 4:3 source keeps its full width and
-            # lands as a centred band, which is what the reference style is.
-            chains.append(f"[mnsrc]scale=w={CANVAS_W}:h={CANVAS_H}:"
-                          f"force_original_aspect_ratio=decrease:"
-                          f"force_divisible_by=2[mn]")
+            if frame_mode == "fit":
+                # never crop: the whole source frame lands as a centred band,
+                # its height set by the source aspect
+                chains.append(f"[mnsrc]scale=w={CANVAS_W}:h={CANVAS_H}:"
+                              f"force_original_aspect_ratio=decrease:"
+                              f"force_divisible_by=2[mn]")
+            else:
+                # fill: scale by height, then crop to canvas width. A source
+                # narrower than the canvas is scaled up to it first, so the
+                # crop never leaves a transparent edge.
+                h = int(CANVAS_H * FILL_HEIGHT_FRAC) // 2 * 2
+                chains.append(f"[mnsrc]scale=-2:{h},"
+                              f"scale=w='max(iw,{CANVAS_W})':h=-2,"
+                              f"crop={CANVAS_W}:min(ih\\,{h})[mn]")
         chains.append("[bg][mn]overlay=(W-w)/2:(H-h)/2[v0]")
 
         for i, ov in enumerate(overlays):
