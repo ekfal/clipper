@@ -62,6 +62,20 @@ def _requirements(conn, campaign_id):
     return json.loads(row["requirements_json"]) if row and row["requirements_json"] else {}
 
 
+def _destinations(reqs):
+    """Every surface this clip will end up on, upload target first.
+
+    The clip is cut once and has to fit all of them, so the campaign's required
+    platforms count even in slice-1 where only PLATFORM is actually posted to —
+    a clip cut at 180s for TikTok would have to be re-cut to ever reach Shorts.
+    """
+    dests = [PLATFORM]
+    for p in reqs.get("platforms_required") or []:
+        if p in selector.DURATION_RANGES and p not in dests:
+            dests.append(p)
+    return dests
+
+
 def _wants_clean_mode(reqs):
     """PRD §3.6: campaign brief forbidding visual additions forces clean mode."""
     brief = (reqs.get("brief") or "").lower()
@@ -94,15 +108,22 @@ def process_task(conn, task):
         "SELECT start_ts, end_ts FROM segment_usage WHERE video_id=? AND platform=?",
         (video_id, PLATFORM)).fetchall()
     used = [(r["start_ts"], r["end_ts"]) for r in rows]
+    dests = _destinations(reqs)
+    window = selector.duration_window(dests)
+    if window is None:
+        raise RuntimeError(
+            f"no clip length fits every destination {dests} — "
+            f"windows {[selector.DURATION_RANGES[d] for d in dests]}")
+    print(f"  destinations {'+'.join(dests)} -> {window[0]}-{window[1]}s")
     # topic-aware cuts first: a clip should end when its topic ends
     picks = selector.pick_topical_segments(
-        words, PLATFORM, CLIPS_PER_TASK, existing=used,
+        words, dests, CLIPS_PER_TASK, existing=used,
         video_duration=info["duration"])
     if not picks:
         heatmap = fetch.heatmap_for(video_path)
         picks = [{"start": s, "end": e, "hook": None, "topic": ""}
                  for s, e in selector.pick_segments(
-                     info["duration"], heatmap, words, PLATFORM,
+                     info["duration"], heatmap, words, dests,
                      CLIPS_PER_TASK, existing=used)]
     if not picks:
         raise RuntimeError("no viable segments (all used or too little speech)")

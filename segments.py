@@ -27,8 +27,7 @@ INTRO_SKIP = 90.0
 # All three surfaces now accept up to three minutes, so the ceilings below are
 # editorial, not technical — they are where each platform's short format still
 # holds attention, not the longest file it will take:
-#   youtube   60s — the canonical Shorts window; guarantees Shorts treatment
-#                   everywhere and is where Shorts retention lives
+#   youtube   90s — the binding ceiling whenever Shorts is a destination
 #   tiktok   180s — the full three minutes, per the campaign brief
 #   instagram 90s — Reels performs inside this; longer drifts toward feed video
 # The floor is 30s across the board: under that a segment rarely carries a
@@ -48,10 +47,31 @@ def _range_from_env(platform, default):
 
 
 DURATION_RANGES = {
-    "youtube": _range_from_env("youtube", (30, 60)),
+    "youtube": _range_from_env("youtube", (30, 90)),
     "tiktok": _range_from_env("tiktok", (30, 180)),
     "instagram": _range_from_env("instagram", (30, 90)),
 }
+
+
+def duration_window(platforms):
+    """Tightest window that satisfies every destination at once.
+
+    A clip is cut once and posted to several surfaces, so its length has to fit
+    all of them: the floor is the highest floor, the ceiling the lowest ceiling.
+    With YouTube Shorts among the destinations its 90s ceiling binds; drop it
+    and TikTok's 180 opens up.
+
+    Accepts a single platform or an iterable. Returns None when no one length
+    can satisfy the set, so the caller can say so rather than cut something
+    that fits nowhere.
+    """
+    if isinstance(platforms, str):
+        platforms = (platforms,)
+    windows = [DURATION_RANGES[p] for p in platforms if p in DURATION_RANGES]
+    if not windows:
+        raise ValueError(f"no known platform in {list(platforms)!r}")
+    lo, hi = max(w[0] for w in windows), min(w[1] for w in windows)
+    return (lo, hi) if lo < hi else None
 
 
 def _overlaps(start, dur, taken, gap=MIN_GAP):
@@ -69,11 +89,17 @@ def pick_segments(video_duration, heatmap, words, platform, count,
                   existing=(), min_words=15):
     """Return up to `count` (start, end) segments for `platform`.
 
+    platform may be one name or several — with several, the clip is sized to
+    fit all of them at once (see duration_window).
+
     heatmap: [{start_time, value}] or None. words: full transcript word list.
     existing: (start, end) pairs already used for this video+platform
     (from segment_usage) — treated as taken.
     """
-    lo, hi = DURATION_RANGES[platform]
+    window = duration_window(platform)
+    if window is None:
+        return []
+    lo, hi = window
     taken = [tuple(e) for e in existing]
     out = []
     # never skip so much that nothing is left to clip
@@ -202,7 +228,10 @@ def pick_topical_segments(words, platform, count, existing=(), video_duration=No
     """
     import ai
 
-    lo, hi = DURATION_RANGES[platform]
+    window = duration_window(platform)
+    if window is None:
+        return []
+    lo, hi = window
     transcript = compress_transcript(words)
     if not transcript:
         return []
@@ -259,6 +288,25 @@ if __name__ == "__main__":
     del os.environ["CLIPPER_DURATION_NOPE"]
     # every platform's window must sit inside what the surface accepts (180s)
     assert all(0 < lo < hi <= 180 for lo, hi in DURATION_RANGES.values()), DURATION_RANGES
+
+    # one cut has to fit every destination: lowest ceiling, highest floor
+    assert duration_window("tiktok") == (30, 180)
+    assert duration_window(["tiktok", "instagram"]) == (30, 90)
+    # Shorts in the mix binds the ceiling to 90 whatever else is there
+    assert duration_window(["youtube", "tiktok"]) == (30, 90)
+    assert duration_window(["youtube", "tiktok", "instagram"]) == (30, 90)
+    # unknown names are ignored, but an all-unknown set is a caller bug
+    assert duration_window(["youtube", "mastodon"]) == (30, 90)
+    try:
+        duration_window(["mastodon"])
+        raise AssertionError("unknown-only platform set should raise")
+    except ValueError:
+        pass
+    # an impossible set reports rather than cutting something that fits nowhere
+    _saved = dict(DURATION_RANGES)
+    DURATION_RANGES["tiktok"] = (120, 180)
+    assert duration_window(["youtube", "tiktok"]) is None
+    DURATION_RANGES.update(_saved)
 
     random.seed(42)  # deterministic durations
     words = [{"word": f"w{i}", "start": i * 0.5, "end": i * 0.5 + 0.4} for i in range(1200)]
