@@ -10,9 +10,10 @@ import os
 import pickle
 from datetime import datetime, timedelta
 
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+# The Google client libraries are imported where they are used, not here: this
+# module is pulled in by pipeline.py, preflight.py and the dashboard, and those
+# have to stay importable on a box that has not finished its setup — which is
+# exactly the box preflight exists to diagnose.
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_DIR = os.environ.get("CLIPPER_TOKEN_DIR", os.path.join(os.path.dirname(_BASE), "tokens"))
@@ -64,6 +65,8 @@ def available_accounts():
 
 def load_credentials(account):
     """Load an account's credentials, refreshing and re-saving when expired."""
+    from google.auth.transport.requests import Request
+
     path = os.path.join(TOKEN_DIR, f"token_{account}.pickle")
     with open(path, "rb") as f:
         creds = pickle.load(f)
@@ -123,6 +126,9 @@ def upload(conn, video_path, meta, account=ACCOUNT, schedule=True):
     with no timer — nothing goes public unless someone chooses to.
     Raises DailyLimitExceeded when the channel's daily quota is gone.
     """
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+
     creds = load_credentials(account)
     yt = build("youtube", "v3", credentials=creds)
 

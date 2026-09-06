@@ -121,8 +121,16 @@ def _wants_clean_mode(reqs):
     return any(b in brief for b in banned)
 
 
-def process_task(conn, task):
-    """Run one task through download -> ... -> published. Raises on failure."""
+def process_task(conn, task, dry_run=False):
+    """Run one task through download -> ... -> published. Raises on failure.
+
+    dry_run stops after EDITING: the clips are rendered and left on disk, and
+    nothing is published, claimed or recorded. It is the way to exercise the
+    whole chain on a real campaign — Clippo, yt-dlp, whisper, 9Router, ffmpeg —
+    without spending a YouTube upload or a campaign submission slot on a test.
+    Because it writes no clips and no segment_usage rows, the same segments are
+    still free for the real run afterwards.
+    """
     task_id = task["task_id"]
     reqs = _requirements(conn, task["campaign_id"])
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -200,18 +208,35 @@ def process_task(conn, task):
                          hook=meta["hook"], split_screen=False,
                          bgm=track["path"] if track else False,
                          accent_words=meta.get("punchline_words") or ())
-        cur = conn.execute(
-            """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id, status)
-               VALUES (?,?,?,?,?,?)""",
-            (task_id, start, end, PLATFORM, video_id, "EDITED"))
-        conn.execute("INSERT INTO segment_usage VALUES (?,?,?,?)",
-                     (video_id, start, end, PLATFORM))
-        conn.commit()
+        clip_id = None
+        if not dry_run:
+            cur = conn.execute(
+                """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id, status)
+                   VALUES (?,?,?,?,?,?)""",
+                (task_id, start, end, PLATFORM, video_id, "EDITED"))
+            conn.execute("INSERT INTO segment_usage VALUES (?,?,?,?)",
+                         (video_id, start, end, PLATFORM))
+            conn.commit()
+            clip_id = cur.lastrowid
         # route each clip to the channel whose category fits its content
-        account, why = upload_youtube.detect_category(
-            seg_text, title=meta["title"], default=upload_youtube.ACCOUNT)
+        try:
+            account, why = upload_youtube.detect_category(
+                seg_text, title=meta["title"], default=upload_youtube.ACCOUNT)
+        except RuntimeError as e:
+            if not dry_run:
+                raise
+            account, why = None, f"skipped ({e})"   # no tokens on a test box
         print(f"  clip {int(start)}s -> account {account} ({why})")
-        rendered.append((cur.lastrowid, out_path, meta, account))
+        rendered.append((clip_id, out_path, meta, account))
+
+    if dry_run:
+        db.set_task_status(conn, task_id, "DISCOVERED")   # nothing was consumed
+        print(f"  DRY RUN: {len(rendered)} clip(s) left in {OUT_DIR}, nothing "
+              f"uploaded and no segments claimed")
+        for _, path, meta, _ in rendered:
+            print(f"    {path}  ({os.path.getsize(path) // 1024} KB)")
+            print(f"      title: {meta['title']}")
+        return rendered
 
     db.set_task_status(conn, task_id, "UPLOADING")
     for clip_id, path, meta, account in rendered:
@@ -230,13 +255,13 @@ def process_task(conn, task):
     db.set_task_status(conn, task_id, "PUBLISHED")
 
 
-def process(conn, limit=TASKS_PER_RUN):
+def process(conn, limit=TASKS_PER_RUN, dry_run=False):
     """Advance up to `limit` queued tasks. Returns (done, failed)."""
     done = failed = 0
     rows = db.tasks_by_status(conn, "DISCOVERED")[:limit]
     for task in rows:
         try:
-            process_task(conn, task)
+            process_task(conn, task, dry_run=dry_run)
             done += 1
         except upload_youtube.DailyLimitExceeded:
             db.set_task_status(conn, task["task_id"], "DISCOVERED",
@@ -307,11 +332,21 @@ def submit_eligible(conn, adapter=None, dry_run=False):
 
 if __name__ == "__main__":
     import sys
+
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__)
+        print("usage: python pipeline.py [--crawl-only | --process-only] [--dry-run]\n"
+              "  --dry-run   render the clips and stop: nothing is uploaded, no\n"
+              "              segment is claimed, the task stays queued. Use this\n"
+              "              to test the whole chain end to end on a real campaign.")
+        sys.exit(0)
+
+    dry = "--dry-run" in sys.argv
     conn = db.init_db()
     if "--crawl-only" in sys.argv:
         print("crawl:", crawl(conn))
     elif "--process-only" in sys.argv:
-        print("process:", process(conn))
+        print("process:", process(conn, dry_run=dry))
     else:
         print("crawl:", crawl(conn))
-        print("process:", process(conn))
+        print("process:", process(conn, dry_run=dry))

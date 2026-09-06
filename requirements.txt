@@ -1,0 +1,35 @@
+# Runtime dependencies. Install with:  pip install -r requirements.txt
+# ffmpeg itself is a system package, not a Python one:  apt install ffmpeg
+# Fonts too:  apt install fonts-dejavu-core fonts-noto-color-emoji
+
+# --- footage ---------------------------------------------------------------
+# yt-dlp breaks whenever YouTube changes; keep it updated rather than pinned
+# tight, and see fetch.py for the cookies + PO-token setup a flagged VPS needs.
+yt-dlp>=2025.1.1
+gdown>=5.2.0
+
+# --- transcription ---------------------------------------------------------
+# CPU-only, int8. The model itself downloads on first run (~500 MB for "small").
+faster-whisper>=1.1.0
+
+# --- editing ---------------------------------------------------------------
+Pillow>=10.3.0
+
+# --- 9Router client --------------------------------------------------------
+requests>=2.32.0
+
+# --- Clippo session + public profile stats ---------------------------------
+# after install:  playwright install chromium
+playwright>=1.49.0
+
+# --- YouTube upload --------------------------------------------------------
+google-api-python-client>=2.150.0
+google-auth>=2.36.0
+google-auth-oauthlib>=1.2.0
+
+# --- accounts dashboard ----------------------------------------------------
+fastapi>=0.115.0
+uvicorn>=0.32.0
+# FastAPI needs this for the dashboard's Form() endpoints; without it every
+# POST there fails at import time rather than at request time.
+python-multipart>=0.0.18
