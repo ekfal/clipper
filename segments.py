@@ -12,6 +12,7 @@ Allocation rules (§3.5) apply to every path: non-overlapping, >=30s gap between
 segments, never reuse a (video_id, timestamp) already in segment_usage for that
 platform. Boundaries snap to word edges so cuts never land mid-word.
 """
+import os
 import random
 
 MIN_GAP = 30.0  # §3.5: minimum seconds between allocated segments
@@ -22,12 +23,34 @@ INTRO_SKIP = 90.0
 
 # §3.5 duration ranges per platform. These bound the topic, they don't set it:
 # a clip ends when its topic ends, as long as the length lands in range.
-# NOTE: youtube is 60-180 to match Clippo campaign requirements — clips over
-# 60s upload as regular videos, not Shorts.
+#
+# All three surfaces now accept up to three minutes, so the ceilings below are
+# editorial, not technical — they are where each platform's short format still
+# holds attention, not the longest file it will take:
+#   youtube   60s — the canonical Shorts window; guarantees Shorts treatment
+#                   everywhere and is where Shorts retention lives
+#   tiktok   180s — the full three minutes, per the campaign brief
+#   instagram 90s — Reels performs inside this; longer drifts toward feed video
+# The floor is 30s across the board: under that a segment rarely carries a
+# whole thought, and the topical selector has nothing to close on.
+#
+# Override per platform without touching code, e.g.
+#   CLIPPER_DURATION_YOUTUBE=20-90
+def _range_from_env(platform, default):
+    raw = os.environ.get(f"CLIPPER_DURATION_{platform.upper()}")
+    if not raw:
+        return default
+    try:
+        lo, hi = (int(x) for x in raw.split("-", 1))
+    except ValueError:
+        return default
+    return (lo, hi) if 0 < lo < hi else default
+
+
 DURATION_RANGES = {
-    "youtube": (45, 60),     # Shorts hard cap
-    "tiktok": (60, 180),
-    "instagram": (60, 90),
+    "youtube": _range_from_env("youtube", (30, 60)),
+    "tiktok": _range_from_env("tiktok", (30, 180)),
+    "instagram": _range_from_env("instagram", (30, 90)),
 }
 
 
@@ -227,6 +250,16 @@ def pick_topical_segments(words, platform, count, existing=(), video_duration=No
 
 if __name__ == "__main__":
     # Self-check: synthetic 600s video, dense words, fake heatmap.
+    assert _range_from_env("nope", (30, 60)) == (30, 60)
+    os.environ["CLIPPER_DURATION_NOPE"] = "20-90"
+    assert _range_from_env("nope", (30, 60)) == (20, 90)
+    for bad in ("90-20", "abc", "45", "0-60"):   # nonsense keeps the default
+        os.environ["CLIPPER_DURATION_NOPE"] = bad
+        assert _range_from_env("nope", (30, 60)) == (30, 60), bad
+    del os.environ["CLIPPER_DURATION_NOPE"]
+    # every platform's window must sit inside what the surface accepts (180s)
+    assert all(0 < lo < hi <= 180 for lo, hi in DURATION_RANGES.values()), DURATION_RANGES
+
     random.seed(42)  # deterministic durations
     words = [{"word": f"w{i}", "start": i * 0.5, "end": i * 0.5 + 0.4} for i in range(1200)]
     heat = [{"start_time": t, "value": v} for t, v in
