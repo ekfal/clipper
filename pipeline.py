@@ -12,6 +12,7 @@ import json
 import os
 import traceback
 
+import accounts
 import bgm as bgm_lib
 import db
 import edit
@@ -27,7 +28,16 @@ SESSION = os.environ.get("CLIPPO_SESSION", os.path.join(_BASE, "..", "clippo_ses
 OUT_DIR = os.environ.get("CLIPPER_OUT", os.path.join(_BASE, "out"))
 CLIPS_PER_TASK = int(os.environ.get("CLIPPER_CLIPS_PER_TASK", "2"))
 TASKS_PER_RUN = int(os.environ.get("CLIPPER_TASKS_PER_RUN", "1"))
-PLATFORM = "youtube"  # slice-1
+PLATFORM = "youtube"  # slice-1 upload target
+
+# Surfaces Clippo pays for. Its submission form takes only these two URLs, so a
+# clip published anywhere else earns nothing from a campaign.
+CAMPAIGN_PLATFORMS = ("tiktok", "instagram")
+# Surfaces we can actually publish to right now (a working uploader). Widen as
+# each platform's API clears its audit.
+PUBLISH_PLATFORMS = tuple(
+    p.strip() for p in os.environ.get("CLIPPER_PUBLISH_PLATFORMS", PLATFORM).split(",")
+    if p.strip())
 
 
 # Registry (PRD §3.0). Add adapters here, not in the loop.
@@ -62,18 +72,44 @@ def _requirements(conn, campaign_id):
     return json.loads(row["requirements_json"]) if row and row["requirements_json"] else {}
 
 
-def _destinations(reqs):
-    """Every surface this clip will end up on, upload target first.
+def _destinations(conn, campaign_id, reqs):
+    """Surfaces this clip will be published to, which is what sizes it.
 
-    The clip is cut once and has to fit all of them, so the campaign's required
-    platforms count even in slice-1 where only PLATFORM is actually posted to —
-    a clip cut at 180s for TikTok would have to be re-cut to ever reach Shorts.
+    Derived, not chosen: the campaign brief says which platforms it wants, the
+    accounts table says where we have an account cleared for campaign work, and
+    only platforms with a working uploader are publishable. A human can pin the
+    set per campaign from the dashboard when the rule gets it wrong.
+
+    Paying surfaces are sized on their own. YouTube is a farming channel —
+    Clippo cannot accept a YouTube URL — so letting its ceiling into the set
+    would shorten a clip TikTok would have paid for, to suit a destination that
+    pays nothing. It is only the destination when nothing paying is live, which
+    is exactly slice-1 today.
+    Returns (destinations, reason).
     """
-    dests = [PLATFORM]
-    for p in reqs.get("platforms_required") or []:
-        if p in selector.DURATION_RANGES and p not in dests:
-            dests.append(p)
-    return dests
+    publishable = [p for p in PUBLISH_PLATFORMS if p in selector.DURATION_RANGES]
+    ready = accounts.ready_platforms(conn)
+
+    pinned = db.campaign_override(conn, campaign_id)
+    if pinned:
+        keep = [p for p in pinned if p in selector.DURATION_RANGES]
+        if keep:
+            return keep, "pinned in the dashboard"
+
+    required = [p for p in (reqs.get("platforms_required") or [])
+                if p in selector.DURATION_RANGES]
+    paying = [p for p in publishable
+              if p in CAMPAIGN_PLATFORMS and p in required and p in ready]
+    if paying:
+        return paying, "campaign platforms with a ready account"
+
+    farming = [p for p in publishable if p not in CAMPAIGN_PLATFORMS]
+    if farming:
+        why = "no paying platform live — farming channels only"
+        if required:
+            why += f" (campaign wants {'+'.join(required)})"
+        return farming, why
+    return list(publishable), "fallback: no ready account on any destination"
 
 
 def _wants_clean_mode(reqs):
@@ -108,13 +144,13 @@ def process_task(conn, task):
         "SELECT start_ts, end_ts FROM segment_usage WHERE video_id=? AND platform=?",
         (video_id, PLATFORM)).fetchall()
     used = [(r["start_ts"], r["end_ts"]) for r in rows]
-    dests = _destinations(reqs)
+    dests, why = _destinations(conn, task["campaign_id"], reqs)
     window = selector.duration_window(dests)
     if window is None:
         raise RuntimeError(
             f"no clip length fits every destination {dests} — "
             f"windows {[selector.DURATION_RANGES[d] for d in dests]}")
-    print(f"  destinations {'+'.join(dests)} -> {window[0]}-{window[1]}s")
+    print(f"  destinations {'+'.join(dests)} ({why}) -> {window[0]}-{window[1]}s")
     # topic-aware cuts first: a clip should end when its topic ends
     picks = selector.pick_topical_segments(
         words, dests, CLIPS_PER_TASK, existing=used,

@@ -134,6 +134,19 @@ def get(conn, account_id):
                         (account_id,)).fetchone()
 
 
+def ready_platforms(conn):
+    """Platforms with at least one account cleared for campaign work.
+
+    This is the gate the dashboard already maintains: an account that is
+    paused, banned, still warming or merely farming does not make its platform
+    a destination. Creates the table if it is missing, so a pipeline run that
+    never opened the dashboard reads an empty set rather than crashing.
+    """
+    init(conn)
+    return {r["platform"] for r in conn.execute(
+        "SELECT DISTINCT platform FROM accounts WHERE status='campaign_ready'")}
+
+
 def start_warmup(conn, account_id):
     update(conn, account_id, status="warming", warmup_started_at=_now())
 
@@ -301,6 +314,17 @@ if __name__ == "__main__":
 
     verify(conn, aid, "123456")
     assert evaluate(get(conn, aid))[0] == "campaign_ready"
+
+    # The gate reads the APPLIED status, never the suggestion — evaluate() may
+    # say campaign_ready while the stored status is still farming, and until a
+    # human applies it the platform is not a destination.
+    assert evaluate(get(conn, aid))[0] == "campaign_ready"
+    assert ready_platforms(conn) == set(), "suggestion alone opened the gate"
+    update(conn, aid, status="campaign_ready")
+    assert ready_platforms(conn) == {"tiktok"}, ready_platforms(conn)
+    update(conn, aid, status="paused")
+    assert ready_platforms(conn) == set(), "paused account still gates a platform"
+    update(conn, aid, status="campaign_ready")
 
     update(conn, aid, recent_avg_views=2, recent_clip_count=4)
     got, why = evaluate(get(conn, aid))

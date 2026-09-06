@@ -111,6 +111,55 @@ def enqueue_footage(conn, campaign_id, footage_url, source_type):
     return cur.lastrowid if cur.rowcount else None
 
 
+# --- per-campaign destination override (dashboard) -------------------------
+# Stored inside platform_specific_data rather than a new column: the column is
+# already the documented home for per-campaign extras (PRD §3.0), and a
+# migration for a field most campaigns never set is not worth it.
+_OVERRIDE_KEY = "destinations_override"
+
+
+def campaign_override(conn, campaign_id):
+    """Platforms a human pinned for this campaign, or None for automatic."""
+    row = conn.execute(
+        "SELECT platform_specific_data FROM campaigns WHERE campaign_id=?",
+        (campaign_id,)).fetchone()
+    if not row or not row["platform_specific_data"]:
+        return None
+    try:
+        data = json.loads(row["platform_specific_data"])
+    except ValueError:
+        return None
+    value = data.get(_OVERRIDE_KEY) if isinstance(data, dict) else None
+    return list(value) if value else None
+
+
+def set_campaign_override(conn, campaign_id, platforms):
+    """Pin the destinations for one campaign; pass None/[] to return to auto."""
+    row = conn.execute(
+        "SELECT platform_specific_data FROM campaigns WHERE campaign_id=?",
+        (campaign_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"no campaign {campaign_id!r}")
+    try:
+        data = json.loads(row["platform_specific_data"] or "{}")
+        if not isinstance(data, dict):
+            data = {}
+    except ValueError:
+        data = {}
+    if platforms:
+        data[_OVERRIDE_KEY] = list(platforms)
+    else:
+        data.pop(_OVERRIDE_KEY, None)      # back to automatic
+    conn.execute("UPDATE campaigns SET platform_specific_data=? WHERE campaign_id=?",
+                 (json.dumps(data), campaign_id))
+    conn.commit()
+
+
+def all_campaigns(conn):
+    return conn.execute(
+        "SELECT * FROM campaigns ORDER BY discovered_at DESC").fetchall()
+
+
 def tasks_by_status(conn, status):
     return conn.execute("SELECT * FROM tasks WHERE status=?", (status,)).fetchall()
 
@@ -158,4 +207,26 @@ if __name__ == "__main__":
     set_task_status(c, tid, "FAILED", "boom")
     assert c.execute("SELECT COUNT(*) FROM segment_usage").fetchone()[0] == 0
     assert len(tasks_by_status(c, "FAILED")) == 1
+
+    # destination override round-trips and does not disturb sibling keys
+    assert upsert_campaign(c, T(campaign_id="c2",
+                                platform_specific_data={"clip_batch_count": 5})) is True
+    cid = "c2"
+    assert campaign_override(c, cid) is None                  # automatic by default
+    set_campaign_override(c, cid, ["tiktok"])
+    assert campaign_override(c, cid) == ["tiktok"]
+    kept = json.loads(c.execute(
+        "SELECT platform_specific_data FROM campaigns WHERE campaign_id=?",
+        (cid,)).fetchone()["platform_specific_data"])
+    assert "clip_batch_count" in kept, kept        # existing extras survive
+    set_campaign_override(c, cid, None)
+    assert campaign_override(c, cid) is None       # back to automatic
+    assert "clip_batch_count" in json.loads(c.execute(
+        "SELECT platform_specific_data FROM campaigns WHERE campaign_id=?",
+        (cid,)).fetchone()["platform_specific_data"])
+    try:
+        set_campaign_override(c, "nope", ["tiktok"])
+        raise AssertionError("unknown campaign accepted")
+    except ValueError:
+        pass
     print("db.py self-check OK")

@@ -6,6 +6,7 @@ Add accounts, edit their fields, sync public stats, and apply the lifecycle
 status the rules suggest. Suggestions are never auto-applied: a bot wall or a
 misread profile should not promote an account into campaign work by itself.
 """
+import json
 import os
 
 from fastapi import FastAPI, Form, Request
@@ -31,7 +32,15 @@ def _conn():
 
 
 def _esc(v):
-    return ("" if v is None else str(v)).replace("&", "&amp;").replace("<", "&lt;")
+    """Escape for both text and attribute context.
+
+    Quotes matter: campaign ids and usernames reach `value="..."` and a JS
+    confirm() string, and both come from outside — Clippo's API and the add
+    form — so an unescaped quote breaks out of the attribute.
+    """
+    return (("" if v is None else str(v))
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&#39;"))
 
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
@@ -91,6 +100,15 @@ __ERROR__
   <div><label>Proxy label</label><input name="proxy_label" placeholder="id-mobile-3"></div>
   <div><button class="go" type="submit">Add account</button></div>
 </div></form></div>
+<h2 style="font-size:15px;margin:26px 0 8px">Campaigns</h2>
+<p class="sub" style="margin:0 0 12px">Destinations are derived from the brief and
+your ready accounts. Pin one only when the rule gets it wrong &mdash; pinning a
+platform you cannot publish to sizes clips for a surface that never receives them.</p>
+<table><thead><tr>
+ <th>Campaign</th><th>Brief wants</th><th>Destinations now</th><th>Pin</th>
+</tr></thead><tbody>__CAMPAIGNS__</tbody></table>
+
+<h2 style="font-size:15px;margin:26px 0 8px">Accounts</h2>
 <table><thead><tr>
  <th>Account</th><th>Status</th><th>Followers</th><th>Posts</th>
  <th>Health</th><th>Verified</th><th>Device / proxy</th><th>Actions</th>
@@ -99,6 +117,44 @@ __ERROR__
 profiles &middot; healthy new account: 50+ views in 24h, 0&ndash;5 across 3+ clips
 signals a shadowban</p>
 </body></html>"""
+
+
+def _campaign_rows(conn):
+    """One row per campaign: what the brief wants, where clips actually go."""
+    try:
+        import pipeline           # local: pulls the uploader's deps
+        import segments
+    except Exception as e:
+        return (f'<tr><td colspan="4" class="muted" style="padding:20px">'
+                f'destination rules unavailable ({_esc(type(e).__name__)})</td></tr>')
+
+    out = []
+    for c in db.all_campaigns(conn):
+        reqs = json.loads(c["requirements_json"] or "{}")
+        pinned = db.campaign_override(conn, c["campaign_id"]) or []
+        dests, why = pipeline._destinations(conn, c["campaign_id"], reqs)
+        window = segments.duration_window(dests)
+        win = f"{window[0]}&ndash;{window[1]}s" if window else "no common length"
+        boxes = "".join(
+            f'<label style="display:inline-flex;gap:4px;align-items:center;'
+            f'margin-right:8px;color:#e6edf3">'
+            f'<input type="checkbox" name="platforms" value="{p}"'
+            f'{" checked" if p in pinned else ""}>{p}</label>'
+            for p in accounts.PLATFORMS)
+        out.append(f"""<tr>
+ <td>{_esc(reqs.get('title') or c['campaign_id'])}<br>
+     <span class="muted">{_esc(c['campaign_id'])} &middot; {_esc(c['status'])}</span></td>
+ <td class="muted">{_esc('+'.join(reqs.get('platforms_required') or []) or '—')}</td>
+ <td><b>{_esc('+'.join(dests))}</b> <span class="muted">{win}</span>
+     <div class="why">{_esc(why)}</div></td>
+ <td><form method="post" action="/destinations">
+     <input type="hidden" name="campaign_id" value="{_esc(c['campaign_id'])}">
+     {boxes}
+     <button class="go" type="submit">Pin</button>
+     <button type="submit" name="clear" value="1">Auto</button>
+     </form></td></tr>""")
+    return "".join(out) or ('<tr><td colspan="4" class="muted" '
+                            'style="padding:20px">No campaigns crawled yet.</td></tr>')
 
 
 def render(error=""):
@@ -150,7 +206,8 @@ def render(error=""):
     body = "".join(out) or ('<tr><td colspan="8" class="muted" '
                             'style="padding:26px">No accounts yet.</td></tr>')
     opts = "".join(f'<option value="{p}">{p}</option>' for p in accounts.PLATFORMS)
-    return (PAGE.replace("__ROWS__", body)
+    return (PAGE.replace("__CAMPAIGNS__", _campaign_rows(conn))
+                .replace("__ROWS__", body)
                 .replace("__PLATFORMS__", opts)
                 .replace("__COUNT__", f"{len(rows)} account(s)")
                 .replace("__ERROR__", f'<div class="err">{_esc(error)}</div>' if error else ""))
@@ -209,6 +266,17 @@ def sync(account_id: int = Form(...)):
         accounts.sync(_conn(), account_id)
     except Exception as e:
         return _back(f"sync failed: {e}")
+    return _back()
+
+
+@app.post("/destinations")
+def set_destinations(campaign_id: str = Form(...),
+                     platforms: list[str] = Form([]), clear: str = Form("")):
+    try:
+        db.set_campaign_override(_conn(), campaign_id,
+                                 None if clear else platforms)
+    except Exception as e:
+        return _back(f"{type(e).__name__}: {e}")
     return _back()
 
 
