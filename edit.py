@@ -120,7 +120,9 @@ PLATFORM_SAFE_BOTTOM = 0.82
 # leave exactly enough room underneath for a caption lane.
 BELOW_HEIGHT_FRAC = 0.40     # footage height when captions go below it
 BELOW_CAPTION_BOTTOM = 0.81  # caption block bottom, inside the safe area
-BELOW_HOOK_Y = 1100          # hook card still rides on the footage, lower third
+# Hook card bottom (not top): a two-line and a four-line hook then both sit
+# inside the footage instead of the longer one spilling onto the blurred fill.
+BELOW_HOOK_BOTTOM = 0.69
 
 
 def _random_asset(dirpath, exts):
@@ -274,12 +276,14 @@ def _rich_line_image(line, bold_font, reg_font, fill="black"):
     return img.crop((pad, 0, pad + int(ink_w), height))
 
 
-def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False):
+def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, bottom=False):
     """Visual hook — ONE white box behind every line, black text.
 
     The reference draws a single continuous card rather than a stack of
     per-line boxes, so the ragged right edge of the wrap stays inside one
     rectangle. left=True hugs HOOK_X_LEFT, otherwise the card is centered.
+    bottom=True reads `y` as the card's bottom edge, so the card grows upward
+    and a longer hook cannot push past whatever sits under it.
     Returns a list of Overlay specs (always exactly one).
     """
     try:
@@ -308,38 +312,60 @@ def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False):
     path = os.path.join(tmp_dir, _name("h"))
     card.save(path)
     x = HOOK_X_LEFT if left else (CANVAS_W - card.width) // 2
-    return [Overlay(path, int(x), int(y), 0.0, dur)]
+    top = y - card.height if bottom else y
+    return [Overlay(path, int(x), int(top), 0.0, dur)]
+
+
+def _best_split(chunk, max_words, limit):
+    """Where to cut a window that hit the word limit: the clearest pause in it.
+
+    Fast continuous speech has no gap worth cutting on, and this returns the
+    limit so the caption simply fills. When the speaker does breathe inside the
+    window, cutting there keeps a phrase like "GAK USAH" from being sliced
+    across two captions.
+    """
+    gaps = [chunk[i]["start"] - chunk[i - 1]["end"] for i in range(1, len(chunk))]
+    cands = [(gaps[i - 1], i) for i in range(max_words, min(limit, len(chunk)))]
+    if not cands:
+        return limit
+    best_gap, best_i = max(cands)
+    median = sorted(gaps)[len(gaps) // 2]
+    return best_i if best_gap > max(0.12, median * 1.6) else limit
 
 
 def group_phrases(words, gap_split=PHRASE_GAP_SPLIT,
                   max_words=PHRASE_MAX_WORDS, max_lines=PHRASE_MAX_LINES):
     """Group a word list into caption phrases, split on natural pauses.
 
-    A phrase ends where the speaker pauses (>= gap_split seconds) or once it
-    fills max_words * max_lines words — so a caption change lands on a beat in
-    the speech rather than every third word.
+    A phrase ends where the speaker pauses (>= gap_split seconds). If it fills
+    max_words * max_lines words first, it is cut at the clearest pause inside
+    that window instead of exactly on the count, and the remainder carries into
+    the next caption — nothing is dropped.
     Returns [{start, end, lines: [[word, ...], ...]}].
     """
-    phrases, cur = [], []
+    phrases = []
     limit = max_words * max_lines
 
-    def flush():
-        if not cur:
-            return
-        chunk = list(cur)
+    def emit(chunk):
         phrases.append({
             "start": chunk[0]["start"],
             "end": chunk[-1]["end"],
             "lines": [chunk[i:i + max_words] for i in range(0, len(chunk), max_words)],
         })
-        cur.clear()
 
+    cur = []
     for i, w in enumerate(words):
         cur.append(w)
         nxt = words[i + 1] if i + 1 < len(words) else None
-        if len(cur) >= limit or nxt is None or nxt["start"] - w["end"] >= gap_split:
-            flush()
-    flush()
+        if nxt is None or nxt["start"] - w["end"] >= gap_split:
+            emit(cur)
+            cur = []
+        elif len(cur) >= limit:
+            k = _best_split(cur, max_words, limit)
+            emit(cur[:k])
+            cur = cur[k:]
+    if cur:
+        emit(cur)
     return phrases
 
 
@@ -496,9 +522,9 @@ def render_clip(video_path, start, end, words, out_path, *,
             overlays = _karaoke_layer(words, start, tmp_dir, sub_y=sub_y)
         if hook:
             hook_y = HOOK_Y if split_screen else (
-                BELOW_HOOK_Y if below else CLEAN_HOOK_Y)
+                int(BELOW_HOOK_BOTTOM * CANVAS_H) if below else CLEAN_HOOK_Y)
             overlays += _hook_layer(hook, tmp_dir, min(HOOK_DUR, dur),
-                                    y=hook_y, left=not split_screen)
+                                    y=hook_y, left=not split_screen, bottom=below)
 
         bg_video = _random_asset(BG_DIR, (".mp4", ".mov", ".webm")) if split_screen else None
         # bgm: a path chosen by bgm.py (production), or True for a random pick
@@ -617,6 +643,18 @@ if __name__ == "__main__":
     _flat = [w["word"] for p in _ph for l in p["lines"] for w in l]
     assert _flat == [w["word"] for w in dense], _flat
     assert len(_ph) == 4, len(_ph)      # 20 words / 6 per caption
+
+    # a pause inside the window wins over the raw word count, so a phrase is
+    # not sliced in half; the remainder carries forward intact
+    paced = []
+    for i, w in enumerate("satu dua tiga empat lima enam tujuh delapan".split()):
+        t = i * 0.25 + (0.30 if i >= 4 else 0.0)   # a clear breath before "lima"
+        paced.append({"word": w, "start": round(t, 3), "end": round(t + 0.2, 3)})
+    _pp = group_phrases(paced)
+    assert [w["word"] for l in _pp[0]["lines"] for w in l] == \
+        ["satu", "dua", "tiga", "empat"], _pp[0]["lines"]
+    assert [w["word"] for p in _pp for l in p["lines"] for w in l] == \
+        [w["word"] for w in paced]
     # a caption placed "below" must clear the footage by construction, for the
     # worst case (a full three-line phrase) — this is the whole point of the mode
     import tempfile as _tf
@@ -629,6 +667,15 @@ if __name__ == "__main__":
     assert _top > _video_bottom, f"caption {_top} overlaps footage ending {_video_bottom}"
     assert _bot <= PLATFORM_SAFE_BOTTOM * CANVAS_H, (
         f"caption bottom {_bot} runs into the platform UI zone")
+    _video_top = (0.5 - BELOW_HEIGHT_FRAC / 2) * CANVAS_H
+    for _hook in ("**Pendek** aja", "**Nekat!! Densu Berani Banget** Ngajarin "
+                  "Anak-Nya Seperti Ini Ke **Mama Nya Biel**"):
+        _h = _hook_layer(_hook, _tf.mkdtemp(), y=int(BELOW_HOOK_BOTTOM * CANVAS_H),
+                         left=True, bottom=True)[0]
+        _hh = Image.open(_h.path).height
+        assert _h.y >= _video_top, f"hook starts at {_h.y}, above footage {_video_top}"
+        assert _h.y + _hh <= _video_bottom, (
+            f"hook ends at {_h.y + _hh}, past footage {_video_bottom}")
     print("edit.py logic self-check OK")
 
     # Smoke: render 5s from a fetched video, both modes. Needs media/3 present.
