@@ -82,7 +82,9 @@ PHRASE_FONT_SIZE = 54
 PHRASE_STROKE = 6
 PHRASE_LINE_GAP = 6
 PHRASE_MAX_WORDS = 3      # words per line
-PHRASE_MAX_LINES = 3      # lines per phrase before it is flushed
+# Two lines, then a new caption. Three is past what anyone reads off a feed,
+# and a phrase that runs long is flushed and continued rather than truncated.
+PHRASE_MAX_LINES = 2      # lines per phrase before it is flushed
 PHRASE_GAP_SPLIT = 0.45   # a pause this long ends the phrase
 PHRASE_X_FRAC = 0.09      # left margin, fraction of canvas width
 PHRASE_Y_FRAC = 0.61      # block BOTTOM, keeps it inside the footage band
@@ -118,7 +120,6 @@ PLATFORM_SAFE_BOTTOM = 0.82
 # leave exactly enough room underneath for a caption lane.
 BELOW_HEIGHT_FRAC = 0.40     # footage height when captions go below it
 BELOW_CAPTION_BOTTOM = 0.81  # caption block bottom, inside the safe area
-BELOW_MAX_LINES = 2          # the lane fits two lines, not three
 BELOW_HOOK_Y = 1100          # hook card still rides on the footage, lower third
 
 
@@ -487,8 +488,7 @@ def render_clip(video_path, start, end, words, out_path, *,
         if caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,
-                y_frac=BELOW_CAPTION_BOTTOM if below else PHRASE_Y_FRAC,
-                max_lines=BELOW_MAX_LINES if below else PHRASE_MAX_LINES)
+                y_frac=BELOW_CAPTION_BOTTOM if below else PHRASE_Y_FRAC)
         else:
             sub_y = SUB_Y if split_screen else CLEAN_SUB_Y
             if below:
@@ -609,15 +609,20 @@ if __name__ == "__main__":
     assert len(ph[0]["lines"]) == 2, ph[0]["lines"]        # 3 words per line
     assert ph[1]["start"] == 3.0 and ph[0]["end"] == ws[3]["end"]
     dense = [{"word": f"d{i}", "start": i * 0.2, "end": i * 0.2 + 0.15} for i in range(20)]
+    _ph = group_phrases(dense)
     assert all(sum(len(l) for l in p["lines"]) <= PHRASE_MAX_WORDS * PHRASE_MAX_LINES
-               for p in group_phrases(dense))
+               for p in _ph)
+    # an over-long run is continued as the next caption, not truncated: every
+    # word survives, in order
+    _flat = [w["word"] for p in _ph for l in p["lines"] for w in l]
+    assert _flat == [w["word"] for w in dense], _flat
+    assert len(_ph) == 4, len(_ph)      # 20 words / 6 per caption
     # a caption placed "below" must clear the footage by construction, for the
     # worst case (a full three-line phrase) — this is the whole point of the mode
     import tempfile as _tf
     _long = [{"word": f"KATAPANJANG{i}", "start": i * 0.2, "end": i * 0.2 + 0.15}
-             for i in range(PHRASE_MAX_WORDS * BELOW_MAX_LINES)]
-    _ov = _phrase_layer(_long, 0, _tf.mkdtemp(), y_frac=BELOW_CAPTION_BOTTOM,
-                        max_lines=BELOW_MAX_LINES)
+             for i in range(PHRASE_MAX_WORDS * PHRASE_MAX_LINES)]
+    _ov = _phrase_layer(_long, 0, _tf.mkdtemp(), y_frac=BELOW_CAPTION_BOTTOM)
     _top = min(o.y for o in _ov)
     _bot = max(o.y + Image.open(o.path).height for o in _ov)
     _video_bottom = (0.5 + BELOW_HEIGHT_FRAC / 2) * CANVAS_H
