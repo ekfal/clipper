@@ -545,7 +545,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                 bitrate=BITRATE, preset=PRESET, threads=THREADS,
                 caption_style=CAPTION_STYLE, accent_words=(),
                 frame_mode=FRAME_MODE, caption_place=CAPTION_PLACE,
-                hook_style=HOOK_STYLE):
+                hook_style=HOOK_STYLE, intro=None, intro_seconds=None):
     """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -562,6 +562,14 @@ def render_clip(video_path, start, end, words, out_path, *,
 
     hook_style="boxes" (default) is the pull-quote look — one white box per
     line with a teal quote mark above; "card" is a single continuous card.
+
+    intro is an optional b-roll clip played before the segment, which is where
+    the hook then lives: the reference clips open on a different shot and cut to
+    the speaker when the card leaves. Without one the hook rides over the
+    opening seconds of the segment instead, and captions are suppressed while it
+    is up — a caption poking out from behind the hook boxes is the one thing
+    that always looks wrong. That does mean those seconds carry no subtitle,
+    which is the reason to pass an intro.
 
     caption_place="below" (default) sizes the footage like the reference clip
     (40% of the canvas, centred) so the captions fit in a clear strip beneath
@@ -592,10 +600,23 @@ def render_clip(video_path, start, end, words, out_path, *,
             if below:
                 sub_y = int(BELOW_CAPTION_BOTTOM * CANVAS_H) - FONT_SIZE * 2
             overlays = _karaoke_layer(words, start, tmp_dir, sub_y=sub_y)
+        intro_dur = 0.0
+        if intro:
+            intro_dur = float(intro_seconds if intro_seconds else HOOK_DUR)
+            # the segment's captions belong to the segment, which now starts
+            # after the b-roll
+            overlays = [o._replace(t_start=o.t_start + intro_dur,
+                                   t_end=o.t_end + intro_dur) for o in overlays]
+
         if hook:
+            hook_dur = intro_dur if intro else min(HOOK_DUR, dur)
+            if not intro:
+                # nothing may share the screen with the hook: a caption edge
+                # sticking out from behind the boxes reads as a mistake
+                overlays = [o for o in overlays if o.t_start >= hook_dur]
             hook_y = HOOK_Y if split_screen else (
                 int(BELOW_HOOK_BOTTOM * CANVAS_H) if below else CLEAN_HOOK_Y)
-            overlays += _hook_layer(hook, tmp_dir, min(HOOK_DUR, dur),
+            overlays += _hook_layer(hook, tmp_dir, hook_dur,
                                     y=hook_y, left=not split_screen, bottom=below,
                                     style=hook_style)
 
@@ -610,24 +631,32 @@ def render_clip(video_path, start, end, words, out_path, *,
             bgm_path = None
 
         inputs = ["-ss", f"{start}", "-t", f"{dur}", "-i", os.path.abspath(video_path)]
+        intro_idx = None
+        if intro:
+            # loop a short b-roll rather than ending the intro early
+            intro_idx = 1
+            inputs += ["-stream_loop", "-1", "-t", f"{intro_dur}",
+                       "-i", os.path.abspath(intro)]
         if bg_video:
-            inputs += ["-stream_loop", "-1", "-t", f"{dur}",
+            inputs += ["-stream_loop", "-1", "-t", f"{dur + intro_dur}",
                        "-i", os.path.abspath(bg_video)]
+        base = 1 + (1 if intro else 0)
         bgm_idx = None
         if bgm_path:
-            bgm_idx = 1 + (1 if bg_video else 0)
-            inputs += ["-stream_loop", "-1", "-t", f"{dur}",
+            bgm_idx = base + (1 if bg_video else 0)
+            inputs += ["-stream_loop", "-1", "-t", f"{dur + intro_dur}",
                        "-i", os.path.abspath(bgm_path)]
-        first_overlay_idx = 1 + (1 if bg_video else 0) + (1 if bgm_path else 0)
+        first_overlay_idx = base + (1 if bg_video else 0) + (1 if bgm_path else 0)
         for ov in overlays:
             inputs += ["-i", os.path.basename(ov.path)]  # cwd is tmp_dir
 
         cover = (f"scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
                  f"crop={CANVAS_W}:{CANVAS_H}")
         chains = []
+        base_label = "vmain" if intro else "v0"
         if frame_mode == "cover" and not split_screen:
             # nothing to composite: the footage is the frame
-            chains.append(f"[0:v]{cover}[v0]")
+            chains.append(f"[0:v]{cover},setsar=1[{base_label}]")
         elif split_screen and bg_video:
             chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
             chains.append(f"[0:v]scale=-2:980,crop=min(iw\\,1040):980[mn]")
@@ -653,7 +682,12 @@ def render_clip(video_path, start, end, words, out_path, *,
                               f"scale=w='max(iw,{CANVAS_W})':h=-2,"
                               f"crop={CANVAS_W}:min(ih\\,{h})[mn]")
         if not (frame_mode == "cover" and not split_screen):
-            chains.append("[bg][mn]overlay=(W-w)/2:(H-h)/2[v0]")
+            chains.append(f"[bg][mn]overlay=(W-w)/2:(H-h)/2,setsar=1[{base_label}]")
+        if intro:
+            # b-roll cropped to the canvas like any other footage, then joined
+            # in front; overlays build on the concatenated stream
+            chains.insert(0, f"[{intro_idx}:v]{cover},setsar=1[intro]")
+            chains.append("[intro][vmain]concat=n=2:v=1:a=0[v0]")
 
         for i, ov in enumerate(overlays):
             src_label = f"[v{i}]"
@@ -664,12 +698,22 @@ def render_clip(video_path, start, end, words, out_path, *,
                 f"{dst_label}")
         vlabel = f"[v{len(overlays)}]"
 
+        total = dur + intro_dur
+        if intro:
+            # the b-roll runs silent under the BGM; delaying rather than
+            # concatenating means a b-roll with no audio track cannot break it
+            ms = int(intro_dur * 1000)
+            chains.append(f"[0:a]adelay={ms}|{ms}[amain]")
+            speech = "[amain]"
+        else:
+            speech = "[0:a]"
         if bgm_idx is not None:
             chains.append(f"[{bgm_idx}:a]volume={BGM_VOLUME}[bgm]")
-            chains.append(f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0,"
-                          f"afade=t=out:st={max(0, dur - 1):.2f}:d=1[a]")
+            chains.append(f"{speech}[bgm]amix=inputs=2:duration=first:"
+                          f"dropout_transition=0,"
+                          f"afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
         else:
-            chains.append(f"[0:a]afade=t=out:st={max(0, dur - 1):.2f}:d=1[a]")
+            chains.append(f"{speech}afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
 
         # The graph can carry hundreds of overlay chains — pass it as a file so
         # the command never hits the OS argument-length limit.
