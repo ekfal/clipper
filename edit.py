@@ -87,18 +87,20 @@ PHRASE_MAX_WORDS = 3      # words per line
 PHRASE_MAX_LINES = 2      # lines per phrase before it is flushed
 PHRASE_GAP_SPLIT = 0.45   # a pause this long ends the phrase
 PHRASE_X_FRAC = 0.09      # left margin, fraction of canvas width
-PHRASE_Y_FRAC = 0.61      # block BOTTOM, keeps it inside the footage band
+PHRASE_Y_FRAC = 0.80      # block BOTTOM on a full frame (reference: 76-84%)
 # "phrase" (reference look) or "karaoke" (per-word highlight, PRD §3.6)
 CAPTION_STYLE = os.environ.get("CLIPPER_CAPTION_STYLE", "phrase")
 # How the footage sits on the canvas:
-#   "fill" — scale to FILL_HEIGHT_FRAC of the canvas and crop to width. The
-#            subject is bigger and the frame reads punchier on a phone, at the
-#            cost of whatever leaves the left and right edges.
-#   "fit"  — scale the whole frame in, never cropping; band height follows the
-#            source aspect. Nothing is lost, the subject is smaller.
-# "fill" is the default: for talking-head footage the tighter framing wins, and
-# a centred speaker survives the side crop.
-FRAME_MODE = os.environ.get("CLIPPER_FRAME_MODE", "fill")
+#   "cover" — the footage fills the whole 9:16 frame, cropped to fit. No band,
+#             no blurred fill. This is what the reference clips look like, and
+#             what a clean feed already framed for vertical wants.
+#   "fill"  — scale to FILL_HEIGHT_FRAC of the canvas and crop to width, over a
+#             blurred copy of itself. A middle ground for landscape footage.
+#   "fit"   — scale the whole frame in, never cropping; band height follows the
+#             source aspect. Nothing is lost, the subject is smaller.
+# "cover" is the default. It is a no-op crop on vertical footage and a hard
+# zoom on landscape footage, so a landscape source is the case for "fit".
+FRAME_MODE = os.environ.get("CLIPPER_FRAME_MODE", "cover")
 FILL_HEIGHT_FRAC = 0.62
 
 # Where the captions sit relative to the footage:
@@ -204,7 +206,7 @@ def _mixed_text_image(text, font, fill, stroke_width=0):
 
 
 HOOK_Y = 300          # hook block top, centered style (split-screen mode)
-CLEAN_HOOK_Y = 1460   # hook block top, reference style (lower third)
+CLEAN_HOOK_Y = 1330   # hook block top on a full frame (reference: 72%)
 CLEAN_SUB_Y = 1040    # karaoke line in full-frame mode (mid-frame, above hook)
 HOOK_X_LEFT = 162     # left margin, 15% of canvas (measured off the reference)
 HOOK_FONT_SIZE = 56
@@ -577,7 +579,10 @@ def render_clip(video_path, start, end, words, out_path, *,
     tmp_dir = os.path.join(_BASE, f"temp_subs_{uuid.uuid4().hex[:8]}")
     os.makedirs(tmp_dir, exist_ok=True)
     try:
-        below = caption_place == "below" and not split_screen
+        # "cover" fills the frame, so there is no clear strip to put captions
+        # in — they ride on the footage, which is what the reference does.
+        below = (caption_place == "below" and not split_screen
+                 and frame_mode != "cover")
         if caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,
@@ -620,7 +625,10 @@ def render_clip(video_path, start, end, words, out_path, *,
         cover = (f"scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
                  f"crop={CANVAS_W}:{CANVAS_H}")
         chains = []
-        if split_screen and bg_video:
+        if frame_mode == "cover" and not split_screen:
+            # nothing to composite: the footage is the frame
+            chains.append(f"[0:v]{cover}[v0]")
+        elif split_screen and bg_video:
             chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
             chains.append(f"[0:v]scale=-2:980,crop=min(iw\\,1040):980[mn]")
         else:
@@ -644,7 +652,8 @@ def render_clip(video_path, start, end, words, out_path, *,
                 chains.append(f"[mnsrc]scale=-2:{h},"
                               f"scale=w='max(iw,{CANVAS_W})':h=-2,"
                               f"crop={CANVAS_W}:min(ih\\,{h})[mn]")
-        chains.append("[bg][mn]overlay=(W-w)/2:(H-h)/2[v0]")
+        if not (frame_mode == "cover" and not split_screen):
+            chains.append("[bg][mn]overlay=(W-w)/2:(H-h)/2[v0]")
 
         for i, ov in enumerate(overlays):
             src_label = f"[v{i}]"
