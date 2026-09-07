@@ -206,11 +206,20 @@ def _mixed_text_image(text, font, fill, stroke_width=0):
 HOOK_Y = 300          # hook block top, centered style (split-screen mode)
 CLEAN_HOOK_Y = 1460   # hook block top, reference style (lower third)
 CLEAN_SUB_Y = 1040    # karaoke line in full-frame mode (mid-frame, above hook)
-HOOK_X_LEFT = 44      # left margin for reference-style boxes
+HOOK_X_LEFT = 162     # left margin, 15% of canvas (measured off the reference)
 HOOK_FONT_SIZE = 56
-HOOK_DUR = 3.0        # seconds the hook stays on screen
+HOOK_DUR = float(os.environ.get("CLIPPER_HOOK_SECONDS", "7"))
 HOOK_MAX_CHARS = 26   # wrap width per boxed line
 HOOK_PAD_X, HOOK_PAD_Y = 26, 18
+# Two hook treatments seen across the reference clips:
+#   "boxes" — one white box per line, ragged right, a teal quote mark above.
+#   "card"  — a single continuous white card, no icon.
+# "boxes" is the default: it is what the podcast reference uses, and the ragged
+# right edge is what makes it read as a pull-quote rather than a caption.
+HOOK_STYLE = os.environ.get("CLIPPER_HOOK_STYLE", "boxes")
+QUOTE_TEAL = "#64BBA8"   # sampled from the reference
+QUOTE_H = 69             # icon height on our canvas, scaled from the reference
+HOOK_LINE_GAP = 5
 
 
 def _parse_emphasis(text):
@@ -276,12 +285,33 @@ def _rich_line_image(line, bold_font, reg_font, fill="black"):
     return img.crop((pad, 0, pad + int(ink_w), height))
 
 
-def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, bottom=False):
+def _quote_icon(tmp_dir, h=QUOTE_H):
+    """Teal rounded box with white quote marks, sitting above the hook lines."""
+    img = Image.new("RGBA", (int(h * 1.6), h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([0, 0, img.width - 1, img.height - 1], radius=10,
+                        fill=QUOTE_TEAL)
+    try:
+        f = ImageFont.truetype(FONT_PATH, int(h * 1.15))
+    except OSError:
+        f = ImageFont.load_default()
+    q = "\u201c"
+    bbox = f.getbbox(q)
+    d.text(((img.width - (bbox[2] - bbox[0])) / 2 - bbox[0],
+            (img.height - (bbox[3] - bbox[1])) / 2 - bbox[1] + h * 0.16),
+           q, font=f, fill="white")
+    path = os.path.join(tmp_dir, _name("q"))
+    img.save(path)
+    return path
+
+
+def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, bottom=False,
+                style=HOOK_STYLE):
     """Visual hook — ONE white box behind every line, black text.
 
-    The reference draws a single continuous card rather than a stack of
-    per-line boxes, so the ragged right edge of the wrap stays inside one
-    rectangle. left=True hugs HOOK_X_LEFT, otherwise the card is centered.
+    style="boxes" draws one white box per line with a teal quote mark above,
+    the pull-quote look; style="card" draws a single continuous card instead.
+    left=True hugs HOOK_X_LEFT, otherwise the block is centered.
     bottom=True reads `y` as the card's bottom edge, so the card grows upward
     and a longer hook cannot push past whatever sits under it.
     Returns a list of Overlay specs (always exactly one).
@@ -295,25 +325,58 @@ def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, bottom=False)
     except OSError:
         reg_font = bold_font
 
-    lines = _wrap_tokens(_parse_emphasis(text))
+    tokens = _parse_emphasis(text)
+    # A hook with no ** markers is uniformly weighted — and it reads as bold,
+    # not as body text, so an unmarked hook renders bold throughout.
+    if not any(b for _, b in tokens):
+        tokens = [(w, True) for w, _ in tokens]
+    lines = _wrap_tokens(tokens)
     if not lines:
         return []
     rendered = [_rich_line_image(l, bold_font, reg_font) for l in lines]
-    inner_w = max(r.width for r in rendered)
-    inner_h = sum(r.height for r in rendered) + HOOK_PAD_Y // 2 * (len(rendered) - 1)
 
-    card = Image.new("RGBA", (inner_w + HOOK_PAD_X * 2, inner_h + HOOK_PAD_Y * 2),
-                     (255, 255, 255, 255))
-    cy = HOOK_PAD_Y
+    if style == "card":
+        inner_w = max(r.width for r in rendered)
+        inner_h = sum(r.height for r in rendered) + HOOK_PAD_Y // 2 * (len(rendered) - 1)
+        card = Image.new("RGBA", (inner_w + HOOK_PAD_X * 2, inner_h + HOOK_PAD_Y * 2),
+                         (255, 255, 255, 255))
+        cy = HOOK_PAD_Y
+        for r in rendered:
+            card.paste(r, (HOOK_PAD_X, cy), r)
+            cy += r.height + HOOK_PAD_Y // 2
+        path = os.path.join(tmp_dir, _name("h"))
+        card.save(path)
+        x = HOOK_X_LEFT if left else (CANVAS_W - card.width) // 2
+        top = y - card.height if bottom else y
+        return [Overlay(path, int(x), int(top), 0.0, dur)]
+
+    # "boxes": each line gets its own white box, so the right edge stays ragged
+    boxes = []
     for r in rendered:
-        card.paste(r, (HOOK_PAD_X, cy), r)
-        cy += r.height + HOOK_PAD_Y // 2
+        box = Image.new("RGBA", (r.width + HOOK_PAD_X * 2, r.height + HOOK_PAD_Y),
+                        (255, 255, 255, 255))
+        box.paste(r, (HOOK_PAD_X, HOOK_PAD_Y // 2), r)
+        path = os.path.join(tmp_dir, _name("h"))
+        box.save(path)
+        boxes.append((path, box.width, box.height))
 
-    path = os.path.join(tmp_dir, _name("h"))
-    card.save(path)
-    x = HOOK_X_LEFT if left else (CANVAS_W - card.width) // 2
-    top = y - card.height if bottom else y
-    return [Overlay(path, int(x), int(top), 0.0, dur)]
+    icon_path = _quote_icon(tmp_dir)
+    icon_w, icon_h = Image.open(icon_path).size
+    icon_gap = 22
+    total = icon_h + icon_gap + sum(h for _, _, h in boxes) + \
+        HOOK_LINE_GAP * (len(boxes) - 1)
+
+    top = (y - total) if bottom else y
+    overlays = [Overlay(icon_path,
+                        int(HOOK_X_LEFT if left else (CANVAS_W - icon_w) // 2),
+                        int(top), 0.0, dur)]
+    cy = top + icon_h + icon_gap
+    for path, w, h in boxes:
+        overlays.append(Overlay(path,
+                                int(HOOK_X_LEFT if left else (CANVAS_W - w) // 2),
+                                int(cy), 0.0, dur))
+        cy += h + HOOK_LINE_GAP
+    return overlays
 
 
 def _best_split(chunk, max_words, limit):
@@ -479,7 +542,8 @@ def render_clip(video_path, start, end, words, out_path, *,
                 hook=None, split_screen=False, bgm=True, fps=FPS,
                 bitrate=BITRATE, preset=PRESET, threads=THREADS,
                 caption_style=CAPTION_STYLE, accent_words=(),
-                frame_mode=FRAME_MODE, caption_place=CAPTION_PLACE):
+                frame_mode=FRAME_MODE, caption_place=CAPTION_PLACE,
+                hook_style=HOOK_STYLE):
     """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -493,6 +557,9 @@ def render_clip(video_path, start, end, words, out_path, *,
 
     bgm accepts a track path (what pipeline.py passes, chosen by bgm.py from
     the clip's mood), True for a random pick, or False for none.
+
+    hook_style="boxes" (default) is the pull-quote look — one white box per
+    line with a teal quote mark above; "card" is a single continuous card.
 
     caption_place="below" (default) sizes the footage like the reference clip
     (40% of the canvas, centred) so the captions fit in a clear strip beneath
@@ -524,7 +591,8 @@ def render_clip(video_path, start, end, words, out_path, *,
             hook_y = HOOK_Y if split_screen else (
                 int(BELOW_HOOK_BOTTOM * CANVAS_H) if below else CLEAN_HOOK_Y)
             overlays += _hook_layer(hook, tmp_dir, min(HOOK_DUR, dur),
-                                    y=hook_y, left=not split_screen, bottom=below)
+                                    y=hook_y, left=not split_screen, bottom=below,
+                                    style=hook_style)
 
         bg_video = _random_asset(BG_DIR, (".mp4", ".mov", ".webm")) if split_screen else None
         # bgm: a path chosen by bgm.py (production), or True for a random pick
