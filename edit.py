@@ -206,13 +206,16 @@ def _mixed_text_image(text, font, fill, stroke_width=0):
 
 
 HOOK_Y = 300          # hook block top, centered style (split-screen mode)
-CLEAN_HOOK_Y = 1330   # hook block top on a full frame (reference: 72%)
+# Hook block BOTTOM on a full frame. Anchoring the bottom rather than the top
+# is what keeps a four-line hook from growing down past the platform's UI —
+# the block grows upward instead, and the last line is always readable.
+CLEAN_HOOK_BOTTOM = 0.81
 CLEAN_SUB_Y = 1040    # karaoke line in full-frame mode (mid-frame, above hook)
 HOOK_X_LEFT = 162     # left margin, 15% of canvas (measured off the reference)
-HOOK_FONT_SIZE = 56
+HOOK_FONT_SIZE = 44
 HOOK_DUR = float(os.environ.get("CLIPPER_HOOK_SECONDS", "7"))
 HOOK_MAX_CHARS = 26   # wrap width per boxed line
-HOOK_PAD_X, HOOK_PAD_Y = 26, 18
+HOOK_PAD_X, HOOK_PAD_Y = 22, 10
 # Two hook treatments seen across the reference clips:
 #   "boxes" — one white box per line, ragged right, a teal quote mark above.
 #   "card"  — a single continuous white card, no icon.
@@ -614,11 +617,15 @@ def render_clip(video_path, start, end, words, out_path, *,
                 # nothing may share the screen with the hook: a caption edge
                 # sticking out from behind the boxes reads as a mistake
                 overlays = [o for o in overlays if o.t_start >= hook_dur]
-            hook_y = HOOK_Y if split_screen else (
-                int(BELOW_HOOK_BOTTOM * CANVAS_H) if below else CLEAN_HOOK_Y)
+            if split_screen:
+                hook_y, anchor_bottom = HOOK_Y, False
+            elif below:
+                hook_y, anchor_bottom = int(BELOW_HOOK_BOTTOM * CANVAS_H), True
+            else:
+                hook_y, anchor_bottom = int(CLEAN_HOOK_BOTTOM * CANVAS_H), True
             overlays += _hook_layer(hook, tmp_dir, hook_dur,
-                                    y=hook_y, left=not split_screen, bottom=below,
-                                    style=hook_style)
+                                    y=hook_y, left=not split_screen,
+                                    bottom=anchor_bottom, style=hook_style)
 
         bg_video = _random_asset(BG_DIR, (".mp4", ".mov", ".webm")) if split_screen else None
         # bgm: a path chosen by bgm.py (production), or True for a random pick
@@ -736,7 +743,64 @@ def render_clip(video_path, start, end, words, out_path, *,
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _preview_cli(argv):
+    """Render one clip from a local file — no Clippo, no 9Router, no upload.
+
+        python edit.py preview FOOTAGE [--start 0] [--end 45] [--hook "..."]
+                               [--intro BROLL] [--out clip.mp4] [--words w.json]
+
+    This is the local loop: drop a source in, look at the result. The transcript
+    comes from faster-whisper (cached beside the video, so the second run is
+    instant) unless --words points at one, and the hook is whatever you type
+    rather than what the model would have written.
+    """
+    import argparse
+    import json as _json
+
+    p = argparse.ArgumentParser(prog="edit.py preview")
+    p.add_argument("footage")
+    p.add_argument("--start", type=float, default=0.0)
+    p.add_argument("--end", type=float, default=None)
+    p.add_argument("--hook", default=None,
+                   help="**double asterisks** render bold")
+    p.add_argument("--intro", default=None, help="b-roll played before the clip")
+    p.add_argument("--intro-seconds", type=float, default=None)
+    p.add_argument("--out", default="preview.mp4")
+    p.add_argument("--words", default=None, help="transcript JSON, skips whisper")
+    p.add_argument("--bgm", default=None, help="path to a music track")
+    p.add_argument("--frame-mode", default=FRAME_MODE, choices=("cover", "fill", "fit"))
+    p.add_argument("--caption-style", default=CAPTION_STYLE,
+                   choices=("phrase", "karaoke"))
+    p.add_argument("--hook-style", default=HOOK_STYLE, choices=("boxes", "card"))
+    a = p.parse_args(argv)
+
+    if a.words:
+        with open(a.words, encoding="utf-8") as f:
+            data = _json.load(f)
+        words = data["words"] if isinstance(data, dict) else data
+    else:
+        import transcribe
+        print("transcribing (cached next to the video after the first run)...")
+        words, _info = transcribe.transcribe(a.footage)
+    end = a.end
+    if end is None:
+        end = max((w["end"] for w in words), default=a.start + 30.0)
+    seg = [w for w in words if a.start <= w["start"] < end]
+    print(f"segment {a.start:.1f}-{end:.1f}s, {len(seg)} words")
+
+    render_clip(a.footage, a.start, end, seg, a.out,
+                hook=a.hook, bgm=a.bgm or False,
+                intro=a.intro, intro_seconds=a.intro_seconds,
+                frame_mode=a.frame_mode, caption_style=a.caption_style,
+                hook_style=a.hook_style)
+    print(f"wrote {a.out} ({os.path.getsize(a.out) // 1024} KB)")
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "preview":
+        _preview_cli(sys.argv[2:])
+        sys.exit(0)
+
     # Logic self-check first (no ffmpeg, no footage), then an optional render.
     assert _parse_emphasis("**Nekat!! Berani** Ngomong Ke **Mantan**") == [
         ("Nekat!!", True), ("Berani", True), ("Ngomong", False), ("Ke", False),
@@ -788,6 +852,20 @@ if __name__ == "__main__":
     assert _top > _video_bottom, f"caption {_top} overlaps footage ending {_video_bottom}"
     assert _bot <= PLATFORM_SAFE_BOTTOM * CANVAS_H, (
         f"caption bottom {_bot} runs into the platform UI zone")
+    # on a full frame the hook must never grow past the platform UI, whatever
+    # the wrap produces — the failure this catches is a last line nobody sees
+    for _n, _hook in ((1, "**Pendek**"), (3, "**Cara Paling Elegan** Nanya Nama "
+                      "Orang Kalau **Kamu Terlanjur Lupa!**"),
+                      (5, "**Ini Hook Yang Sangat Panjang Sekali** Sampai Harus "
+                          "Dibungkus Ke Banyak Baris **Biar Ketahuan**")):
+        _ov = _hook_layer(_hook, _tf.mkdtemp(), y=int(CLEAN_HOOK_BOTTOM * CANVAS_H),
+                          left=True, bottom=True)
+        _bot = max(o.y + Image.open(o.path).height for o in _ov)
+        _top = min(o.y for o in _ov)
+        assert _bot <= PLATFORM_SAFE_BOTTOM * CANVAS_H + 1, (
+            f"hook of {_n} lines ends at {_bot}, past the platform UI line")
+        assert _top >= 0, f"hook of {_n} lines starts off-frame at {_top}"
+
     _video_top = (0.5 - BELOW_HEIGHT_FRAC / 2) * CANVAS_H
     for _hook in ("**Pendek** aja", "**Nekat!! Densu Berani Banget** Ngajarin "
                   "Anak-Nya Seperti Ini Ke **Mama Nya Biel**"):
