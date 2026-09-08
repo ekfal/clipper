@@ -714,13 +714,19 @@ def render_clip(video_path, start, end, words, out_path, *,
             speech = "[amain]"
         else:
             speech = "[0:a]"
+        # A looped BGM track hands amix packets with no timestamp once it wraps
+        # past its own length, and the muxer rejects them (dts NOPTS). Stamping
+        # the mixed result rebuilds a monotonic clock; without it a clip longer
+        # than the music simply fails to write.
+        restamp = "asetpts=N/SR/TB"
         if bgm_idx is not None:
             chains.append(f"[{bgm_idx}:a]volume={BGM_VOLUME}[bgm]")
             chains.append(f"{speech}[bgm]amix=inputs=2:duration=first:"
-                          f"dropout_transition=0,"
+                          f"dropout_transition=0,{restamp},"
                           f"afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
         else:
-            chains.append(f"{speech}afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
+            chains.append(f"{speech}{restamp},"
+                          f"afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
 
         # The graph can carry hundreds of overlay chains — pass it as a file so
         # the command never hits the OS argument-length limit.

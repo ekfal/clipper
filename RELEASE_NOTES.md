@@ -171,6 +171,40 @@ Every module runs its own checks: `python db.py`, `python segments.py`,
 
 ---
 
+## v0.2.1 — agent entry point
+
+`job.py` is the contract an agent drives: two links in, one clip out.
+
+```bash
+python job.py --list                        # catalogue of styles and music, JSON
+python job.py --content URL --opening URL   # render, JSON result on stdout
+```
+
+Both print JSON on stdout and nothing else; progress goes to stderr and a
+failure prints `{"ok": false, "error": ...}` with a non-zero exit, so a caller
+never has to read a traceback to tell someone what went wrong. `--list` returns
+every choosable style with the label a person should see, plus the music
+library, the mood vocabulary and the length windows — enough for an agent to
+offer the options without hardcoding them.
+
+The opening link answers a question the renderer had left open: b-roll comes
+from the user, per job.
+
+Posting to chat, parsing the request and holding the conversation stay with the
+agent, which knows its own transport. This module stops at the file.
+
+**Audio fix that came out of building it.** A BGM track shorter than the clip is
+looped, and once it wraps past its own length it hands `amix` packets with no
+timestamp; the muxer rejects them and the render fails outright. Re-stamping the
+mixed result fixes it. This had been latent — it only shows when the clip
+outruns the music, which an intro makes more likely. Verified across the matrix:
+intro with and without BGM, BGM without intro, neither, and a clip shorter than
+the track.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
@@ -191,6 +225,8 @@ Read this before relying on the pipeline unattended.
   unreachable in practice.
 - **No BGM ducking.** Music sits at a fixed 0.1 under speech rather than
   stepping back for it.
+- **`job.py` has no Discord side.** It renders and returns JSON; delivering the
+  file and holding the conversation are the agent's.
 
 ---
 
