@@ -273,16 +273,50 @@ _Dalmislave_
 
 ---
 
+## v0.2.4 — the pipeline survives being killed
+
+The two items that stood at the top of the gap list since the first review.
+
+**A task killed mid-run is no longer lost.** `process()` only ever collected
+`DISCOVERED`, so a worker killed during `EDITING` or `UPLOADING` left its task
+in a state nothing would ever pick up again. Tasks sitting in a worker-held
+state past `CLIPPER_STALE_MINUTES` (default 90 — longer than whisper on a long
+video) are swept back into the queue at the start of each run.
+
+**And it resumes rather than restarts.** Rendering is the expensive stage, so
+clips an earlier attempt already produced are reused: the resume check runs
+*before* segment selection, so a retry skips the model call too. Clip rows now
+carry the metadata and account the upload needs, because asking the model again
+would put a different title on a file that already exists. Measured on the
+crash-and-resume cycle: **zero** extra model calls, and the title on the
+published clip is the one from the first attempt.
+
+A rendered file that has gone missing under its clip row is the other case: the
+row is dropped and its timestamp released, since nothing can publish it any
+more. Requeuing deliberately does *not* release reservations — a clip about to
+be resumed would otherwise have its slot claimed by another task mid-flight.
+
+**Failing a task no longer frees another task's segments.** The release deleted
+every `segment_usage` row for the video, not the ranges the failing task
+reserved. Two campaigns routinely share footage, so one failure re-opened
+timestamps another task had already published — and the next run cut and
+uploaded the same moment again. It now matches the exact range and skips
+anything already out. The regression test builds precisely that situation: two
+tasks on one video, one publishes, the other fails, and the published
+reservations must survive.
+
+An existing self-check had to be corrected to land this: its fixture inserted a
+clip with no start or end, so it only passed because the old code ignored the
+range entirely.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
 
-- **Tasks that crash mid-run are stranded.** `process()` only picks up
-  `DISCOVERED`; a task killed during `EDITING` or `UPLOADING` stays there and
-  nothing collects it. The PRD asks for resume-from-last-state and this does not
-  do it yet. This is the most dangerous item on the list.
-- **`segment_usage` is cleared per `video_id` on failure**, not per task, so a
-  failure on one campaign can free segments another campaign already published.
 - **No view checker.** `submit_eligible()` filters on `views_last_checked`,
   which nothing writes, so Clippo submission never fires.
 - **`recent_avg_views` is never written**, so the dashboard's shadowban

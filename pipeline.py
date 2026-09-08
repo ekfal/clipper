@@ -147,36 +147,63 @@ def process_task(conn, task, dry_run=False):
     if not words:
         raise RuntimeError("empty transcript")
 
-    db.set_task_status(conn, task_id, "ANALYZING")
-    rows = conn.execute(
-        "SELECT start_ts, end_ts FROM segment_usage WHERE video_id=? AND platform=?",
-        (video_id, PLATFORM)).fetchall()
-    used = [(r["start_ts"], r["end_ts"]) for r in rows]
-    dests, why = _destinations(conn, task["campaign_id"], reqs)
-    window = selector.duration_window(dests)
-    if window is None:
-        raise RuntimeError(
-            f"no clip length fits every destination {dests} — "
-            f"windows {[selector.DURATION_RANGES[d] for d in dests]}")
-    print(f"  destinations {'+'.join(dests)} ({why}) -> {window[0]}-{window[1]}s")
-    # topic-aware cuts first: a clip should end when its topic ends
-    picks = selector.pick_topical_segments(
-        words, dests, CLIPS_PER_TASK, existing=used,
-        video_duration=info["duration"])
-    if not picks:
-        heatmap = fetch.heatmap_for(video_path)
-        picks = [{"start": s, "end": e, "hook": None, "topic": ""}
-                 for s, e in selector.pick_segments(
-                     info["duration"], heatmap, words, dests,
-                     CLIPS_PER_TASK, existing=used)]
-    if not picks:
-        raise RuntimeError("no viable segments (all used or too little speech)")
+    # An earlier attempt may have rendered clips before dying. Reuse them:
+    # rendering is the expensive stage, and re-cutting would pick DIFFERENT
+    # segments anyway, since the ones already on disk are still reserved. This
+    # check comes before ANALYZING so a resume also skips the model call that
+    # chooses segments.
+    resumed = []
+    if not dry_run:
+        for row in conn.execute(
+                """SELECT clip_id, start_ts, video_id, meta_json, account
+                     FROM clips WHERE task_id=? AND status='EDITED'
+                 ORDER BY start_ts""", (task_id,)):
+            path = os.path.join(
+                OUT_DIR, f"t{task_id}_{row['video_id']}_{int(row['start_ts'])}.mp4")
+            if row["meta_json"] and os.path.exists(path):
+                resumed.append((row["clip_id"], path,
+                                json.loads(row["meta_json"]), row["account"]))
+            else:
+                # the row is holding a timestamp nothing can publish any more
+                db.drop_clip(conn, row["clip_id"])
+                print(f"  dropped clip {row['clip_id']}: render is gone, "
+                      f"segment released")
+
+    picks = []
+    if resumed:
+        print(f"  resuming {len(resumed)} clip(s) already rendered — "
+              f"skipping selection")
+    else:
+        db.set_task_status(conn, task_id, "ANALYZING")
+        rows = conn.execute(
+            "SELECT start_ts, end_ts FROM segment_usage WHERE video_id=? AND platform=?",
+            (video_id, PLATFORM)).fetchall()
+        used = [(r["start_ts"], r["end_ts"]) for r in rows]
+        dests, why = _destinations(conn, task["campaign_id"], reqs)
+        window = selector.duration_window(dests)
+        if window is None:
+            raise RuntimeError(
+                f"no clip length fits every destination {dests} — "
+                f"windows {[selector.DURATION_RANGES[d] for d in dests]}")
+        print(f"  destinations {'+'.join(dests)} ({why}) -> {window[0]}-{window[1]}s")
+        # topic-aware cuts first: a clip should end when its topic ends
+        picks = selector.pick_topical_segments(
+            words, dests, CLIPS_PER_TASK, existing=used,
+            video_duration=info["duration"])
+        if not picks:
+            heatmap = fetch.heatmap_for(video_path)
+            picks = [{"start": s, "end": e, "hook": None, "topic": ""}
+                     for s, e in selector.pick_segments(
+                         info["duration"], heatmap, words, dests,
+                         CLIPS_PER_TASK, existing=used)]
+        if not picks:
+            raise RuntimeError("no viable segments (all used or too little speech)")
 
     db.set_task_status(conn, task_id, "EDITING")
     # slice-1 renders reference style everywhere; a brief that bans visual
     # additions also disables BGM (PRD §3.6 compliance scan)
     allow_fx = not _wants_clean_mode(reqs)
-    rendered = []  # (clip_id, path, meta, account)
+    rendered = list(resumed)  # (clip_id, path, meta, account)
     used_tracks = []  # sibling clips of this task should not share a track
     for pick in picks:
         start, end = pick["start"], pick["end"]
@@ -208,16 +235,6 @@ def process_task(conn, task, dry_run=False):
                          hook=meta["hook"], split_screen=False,
                          bgm=track["path"] if track else False,
                          accent_words=meta.get("punchline_words") or ())
-        clip_id = None
-        if not dry_run:
-            cur = conn.execute(
-                """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id, status)
-                   VALUES (?,?,?,?,?,?)""",
-                (task_id, start, end, PLATFORM, video_id, "EDITED"))
-            conn.execute("INSERT INTO segment_usage VALUES (?,?,?,?)",
-                         (video_id, start, end, PLATFORM))
-            conn.commit()
-            clip_id = cur.lastrowid
         # route each clip to the channel whose category fits its content
         try:
             account, why = upload_youtube.detect_category(
@@ -227,6 +244,23 @@ def process_task(conn, task, dry_run=False):
                 raise
             account, why = None, f"skipped ({e})"   # no tokens on a test box
         print(f"  clip {int(start)}s -> account {account} ({why})")
+
+        clip_id = None
+        if not dry_run:
+            # meta and account are stored with the clip: a task that dies
+            # before uploading is resumed from the rendered file, and asking
+            # the model again would give it a different title than the one
+            # already on disk.
+            cur = conn.execute(
+                """INSERT INTO clips (task_id, start_ts, end_ts, platform, video_id,
+                                      status, meta_json, account, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (task_id, start, end, PLATFORM, video_id, "EDITED",
+                 json.dumps(meta), account, db._now()))
+            conn.execute("INSERT INTO segment_usage VALUES (?,?,?,?)",
+                         (video_id, start, end, PLATFORM))
+            conn.commit()
+            clip_id = cur.lastrowid
         rendered.append((clip_id, out_path, meta, account))
 
     if dry_run:
@@ -258,6 +292,10 @@ def process_task(conn, task, dry_run=False):
 def process(conn, limit=TASKS_PER_RUN, dry_run=False):
     """Advance up to `limit` queued tasks. Returns (done, failed)."""
     done = failed = 0
+    # A worker killed mid-task leaves it in a state nothing collects. Sweep
+    # those back into the queue first, or they are lost for good (PRD §5).
+    for task_id, was in db.requeue_stale(conn):
+        print(f"  requeued task {task_id} abandoned in {was}")
     rows = db.tasks_by_status(conn, "DISCOVERED")[:limit]
     for task in rows:
         try:
