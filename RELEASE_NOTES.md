@@ -205,6 +205,37 @@ _Dalmislave_
 
 ---
 
+## v0.2.2 — failure reports, and testing the download on its own
+
+**`report.py`.** A traceback pasted out of a terminal loses what actually
+decides the answer: which ffmpeg, whether cookies were there, how much disk was
+left, which style the job ran with. Every failure in `job.py` and `pipeline.py`
+now writes a JSON report carrying all of it, and the path comes back in the
+job's own JSON so a caller can hand it on without shell access to the box.
+
+Set `CLIPPER_GITHUB_TOKEN` and `CLIPPER_GITHUB_REPO` and it also files a GitHub
+issue — the one channel a maintainer can read without access to the machine. A
+repeat of a failure already open comments on that issue instead of opening
+another: failures are fingerprinted by exception type plus the first line with
+paths and numbers flattened, so the same wall hit nightly leaves one thread
+rather than a pile.
+
+Nothing secret goes in a report. API keys, cookie contents and OAuth tokens are
+never read — only whether they are present, which is the diagnostic value. The
+self-check asserts none of them appear in the output.
+
+Use a fine-grained token scoped to issues on this repo alone. It sits on the
+VPS, so it should be able to do nothing else.
+
+**`python fetch.py URL`** downloads one link and reports what landed. Download
+is the only stage that depends on cookies, a PO token and the host's
+reputation, so when a job dies at the first step this says whether the link or
+the setup is at fault — without spending a whole render to find out.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
@@ -227,6 +258,9 @@ Read this before relying on the pipeline unattended.
   stepping back for it.
 - **`job.py` has no Discord side.** It renders and returns JSON; delivering the
   file and holding the conversation are the agent's.
+- **Downloading is untested in CI.** The routing and the error shape are
+  covered, but no test actually reaches YouTube or Drive; `python fetch.py URL`
+  on a real host is the check.
 
 ---
 

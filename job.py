@@ -8,7 +8,9 @@ machine readable and nothing needs a human at a terminal:
 
 Both commands print JSON on stdout and nothing else; progress goes to stderr.
 A failure prints {"ok": false, "error": ...} and exits non-zero, so the caller
-never has to parse a traceback to tell the user what went wrong.
+never has to parse a traceback to tell the user what went wrong. It also files
+a diagnostic report (see report.py) and returns its path, so the failure can be
+looked at later without shell access to the box.
 
 This module deliberately stops at the file: posting to Discord, parsing the
 chat message and holding the conversation belong to the agent, which knows its
@@ -217,8 +219,13 @@ def main(argv=None):
                   **style)
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
-        print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
-                         ensure_ascii=False))
+        import report
+        filed = report.capture(e, "job", context={
+            "content": a.content, "opening": a.opening, "platform": a.platform,
+            "start": a.start, "seconds": a.seconds, **style})
+        out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        out.update(filed)
+        print(json.dumps(out, ensure_ascii=False))
         return 1
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0

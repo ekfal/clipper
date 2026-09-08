@@ -125,7 +125,58 @@ def heatmap_for(video_path):
     return None
 
 
+def _cli(argv):
+    """Download one link and report what landed — the smallest possible test.
+
+        python fetch.py https://youtu.be/xxxx
+
+    Worth running on its own before a whole job: it is the only stage that
+    depends on cookies, a PO token and the host's reputation, so when a job
+    fails at the first step this says whether the link or the setup is at
+    fault. Prints JSON; a failure prints the reason and exits non-zero.
+    """
+    import json as _json
+    import sys as _sys
+    from clippo import classify_source
+
+    url = argv[0]
+    kind = classify_source(url)
+    if kind not in ROUTES:
+        print(_json.dumps({"ok": False, "url": url, "kind": kind,
+                           "error": f"{kind} links are not supported"}))
+        return 1
+    tag = argv[1] if len(argv) > 1 else "cli"
+    print(f"[{kind}] downloading to {os.path.join(MEDIA_DIR, tag)}/ ...",
+          file=_sys.stderr)
+    try:
+        files = fetch(kind, url, tag)
+    except Exception as e:
+        print(_json.dumps({"ok": False, "url": url, "kind": kind,
+                           "error": f"{type(e).__name__}: {e}",
+                           "cookies": YTDLP_COOKIES or None}, ensure_ascii=False))
+        return 1
+    if not files:
+        print(_json.dumps({"ok": False, "url": url, "kind": kind,
+                           "error": "nothing video-shaped was downloaded"}))
+        return 1
+    out = []
+    for f in files:
+        entry = {"path": os.path.abspath(f), "size_bytes": os.path.getsize(f)}
+        side = os.path.splitext(f)[0] + ".heatmap.json"
+        entry["heatmap"] = os.path.exists(side)
+        out.append(entry)
+    print(_json.dumps({"ok": True, "url": url, "kind": kind,
+                       "cookies": bool(YTDLP_COOKIES), "files": out},
+                      indent=2, ensure_ascii=False))
+    return 0
+
+
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        sys.exit(_cli(sys.argv[1:]))
+
     # Self-check: routing + video filter, no network.
     assert ROUTES["youtube"] is fetch_youtube and ROUTES["gdrive"] is fetch_gdrive
     assert VIDEO_EXT.search("a/b/clip.MOV") and VIDEO_EXT.search("x.mp4")

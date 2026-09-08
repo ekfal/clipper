@@ -269,6 +269,13 @@ def process(conn, limit=TASKS_PER_RUN, dry_run=False):
             break
         except Exception as e:
             traceback.print_exc()
+            import report
+            filed = report.capture(e, "pipeline", context={
+                "task_id": task["task_id"], "campaign_id": task["campaign_id"],
+                "footage_url": task["footage_url"], "dry_run": dry_run})
+            print(f"  report: {filed.get('report')}"
+                  + (f" -> {filed['github']['url']}"
+                     if (filed.get("github") or {}).get("posted") else ""))
             db.set_task_status(conn, task["task_id"], "FAILED", str(e)[:500])
             failed += 1
     return done, failed

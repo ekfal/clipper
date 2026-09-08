@@ -109,6 +109,12 @@ def main():
         check("pipeline imports", False,
               f"{type(e).__name__}: {e} — install the missing dependency")
 
+    import report
+    check("failure reports", True,
+          f"written to {report.REPORT_DIR}"
+          + (f", filed to github:{report.GH_REPO}" if report.GH_TOKEN and report.GH_REPO
+             else " (set CLIPPER_GITHUB_TOKEN + CLIPPER_GITHUB_REPO to file issues)"))
+
     # --- timing ---
     videos = []
     media = os.path.join(_BASE, "media")
