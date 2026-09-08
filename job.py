@@ -6,6 +6,9 @@ machine readable and nothing needs a human at a terminal:
     python job.py --list                      # catalogue of styles and music
     python job.py --opening URL --content URL # render, print a JSON result
 
+One job runs at a time per host, and a request arriving while another is in
+flight exits 3 with {"busy": true} rather than queueing behind it.
+
 Both commands print JSON on stdout and nothing else; progress goes to stderr.
 A failure prints {"ok": false, "error": ...} and exits non-zero, so the caller
 never has to parse a traceback to tell the user what went wrong. It also files
@@ -25,6 +28,54 @@ import traceback
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.environ.get("CLIPPER_JOB_OUT", os.path.join(_BASE, "jobs"))
+LOCK_PATH = os.environ.get("CLIPPER_JOB_LOCK", os.path.join(_BASE, ".job.lock"))
+# Seconds to wait for a job already running. Zero means refuse immediately,
+# which is the right answer over chat: a caller would rather be told to try
+# again than watch a request hang.
+LOCK_WAIT = float(os.environ.get("CLIPPER_JOB_LOCK_WAIT", "0"))
+
+
+class Busy(RuntimeError):
+    """Another job holds the machine."""
+
+
+class _Lock:
+    """One job at a time on this host.
+
+    Whisper and ffmpeg each want most of a small VPS; two jobs in parallel do
+    not run twice as fast, they run out of memory. The lock is advisory and
+    per-host, held only for the duration of the run.
+    """
+
+    def __init__(self, path=LOCK_PATH, wait=LOCK_WAIT):
+        self.path, self.wait, self.fh = path, wait, None
+
+    def __enter__(self):
+        import fcntl
+        self.fh = open(self.path, "w")
+        deadline = time.time() + self.wait
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.fh.write(f"{os.getpid()} {time.time():.0f}\n")
+                self.fh.flush()
+                return self
+            except OSError:
+                if time.time() >= deadline:
+                    self.fh.close()
+                    self.fh = None
+                    raise Busy(
+                        "another clip is being rendered on this host — try "
+                        "again in a minute")
+                time.sleep(1.0)
+
+    def __exit__(self, *exc):
+        import fcntl
+        if self.fh:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
+            self.fh.close()
+            self.fh = None
+        return False
 
 
 def _log(msg):
@@ -101,8 +152,16 @@ def _fetch_one(url, tag):
         raise ValueError(
             f"{tag}: {kind} links are not supported yet — send a YouTube or "
             f"Google Drive link")
-    _log(f"[{tag}] downloading ({kind})...")
-    files = fetch.fetch(kind, url, f"job_{tag}")
+    # Keyed by the URL, not by the run: two jobs never share a folder (a Drive
+    # fetch walks the whole directory and would otherwise pick up the previous
+    # job's file), and the same link retried reuses its download and its
+    # cached transcript instead of paying for both again.
+    slot = fetch.cache_tag(url)
+    _log(f"[{tag}] downloading ({kind}) -> {slot}")
+    try:
+        files = fetch.fetch(kind, url, slot)
+    except fetch.SourceTooBig as e:
+        raise fetch.SourceTooBig(f"{tag}: {e}") from None
     if not files:
         raise RuntimeError(f"{tag}: nothing downloadable at that link")
     return max(files, key=os.path.getsize)
@@ -113,12 +172,17 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
     import bgm
     import edit
+    import fetch
     import metadata
     import segments as selector
     import transcribe
 
     os.makedirs(OUT_DIR, exist_ok=True)
     t0 = time.time()
+
+    swept = fetch.prune_cache()
+    if swept:
+        _log(f"swept {len(swept)} cached download(s) past their TTL")
 
     content = _fetch_one(content_url, "content")
     opening = _fetch_one(opening_url, "opening") if opening_url else None
@@ -200,6 +264,8 @@ def main(argv=None):
     p.add_argument("--caption-style", dest="caption_style",
                    choices=("phrase", "karaoke"))
     p.add_argument("--hook-style", dest="hook_style", choices=("boxes", "card"))
+    p.add_argument("--wait", type=float, default=None,
+                   help="seconds to wait if another job holds the host")
     a = p.parse_args(argv)
 
     if a.list:
@@ -214,9 +280,16 @@ def main(argv=None):
              (("frame_mode", a.frame_mode), ("caption_style", a.caption_style),
               ("hook_style", a.hook_style)) if v}
     try:
-        res = run(a.content, a.opening, hook=a.hook, platform=a.platform,
-                  start=a.start, seconds=a.seconds, mood=a.mood, out=a.out,
-                  **style)
+        with _Lock(wait=a.wait if a.wait is not None else LOCK_WAIT):
+            res = run(a.content, a.opening, hook=a.hook, platform=a.platform,
+                      start=a.start, seconds=a.seconds, mood=a.mood, out=a.out,
+                      **style)
+    except Busy as e:
+        # not a failure of this job, so it gets no report and its own code —
+        # the caller should retry rather than escalate
+        print(json.dumps({"ok": False, "busy": True, "error": str(e)},
+                         ensure_ascii=False))
+        return 3
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         import report

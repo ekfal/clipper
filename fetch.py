@@ -8,6 +8,7 @@ Drive files/folders. Files land in MEDIA_DIR/<task_id>/; a heatmap (YouTube
 import json
 import os
 import re
+import sys
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 MEDIA_DIR = os.environ.get("CLIPPER_MEDIA", os.path.join(_BASE, "media"))
@@ -33,6 +34,115 @@ YTDLP_COOKIES = os.environ.get("CLIPPER_YT_COOKIES") or (
 )
 MIN_GOOD_HEIGHT = 720
 
+# Input limits. Anyone who can send a link can otherwise hand the box a
+# three-hour upload: gigabytes to download, an hour of whisper, and a render
+# behind it. Refusing early with a reason costs the sender one message; not
+# refusing costs everyone the machine.
+MAX_SOURCE_SECONDS = int(os.environ.get("CLIPPER_MAX_SOURCE_SECONDS", "3600"))
+MAX_SOURCE_BYTES = int(float(os.environ.get("CLIPPER_MAX_SOURCE_GB", "2")) * 1e9)
+# Downloads are cached per source URL and swept by age, not per run: the same
+# link retried with a different style must not re-download or re-transcribe.
+MEDIA_TTL_HOURS = float(os.environ.get("CLIPPER_MEDIA_TTL_HOURS", "24"))
+CACHE_PREFIX = "u"
+
+
+class SourceTooBig(ValueError):
+    """The link is fine, it is just more than this host agreed to take."""
+
+
+def cache_tag(url):
+    """Directory key for a source URL — same link, same folder, every time."""
+    import hashlib
+    return CACHE_PREFIX + hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+
+
+def probe_seconds(path):
+    """Duration via ffmpeg's own banner; None when it cannot be read.
+
+    ffprobe is not always installed next to ffmpeg (a static build often ships
+    alone), so this parses `ffmpeg -i` rather than assuming a second binary.
+    """
+    import re
+    import subprocess
+
+    import edit
+    try:
+        out = subprocess.run([edit.FFMPEG, "-i", path], capture_output=True,
+                             text=True, timeout=30).stderr
+    except Exception:
+        return None
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", out)
+    if not m:
+        return None
+    h, mnt, s = m.groups()
+    return int(h) * 3600 + int(mnt) * 60 + float(s)
+
+
+def _human_bytes(n):
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
+
+
+def _human_secs(n):
+    return f"{n / 60:.0f} min" if n >= 60 else f"{n:.0f} sec"
+
+
+def enforce_limits(paths):
+    """Reject what is over budget, after the fact. Returns the paths.
+
+    The message goes straight back to whoever sent the link, so it names the
+    actual and the allowed in units that read at whatever the limit is set to.
+    """
+    for p in paths:
+        size = os.path.getsize(p)
+        if size > MAX_SOURCE_BYTES:
+            raise SourceTooBig(
+                f"{os.path.basename(p)} is {_human_bytes(size)}, over the "
+                f"{_human_bytes(MAX_SOURCE_BYTES)} limit")
+        secs = probe_seconds(p)
+        if secs is None:
+            # Without a probe the duration limit cannot be applied. Say so
+            # rather than letting a three-hour file through in silence — for a
+            # YouTube link the pre-download check still caught it, but a Drive
+            # link has no other guard.
+            print(f"WARNING: could not read the duration of "
+                  f"{os.path.basename(p)} (is ffmpeg on PATH?) — the "
+                  f"{_human_secs(MAX_SOURCE_SECONDS)} limit was not applied",
+                  file=sys.stderr)
+        if secs and secs > MAX_SOURCE_SECONDS:
+            raise SourceTooBig(
+                f"{os.path.basename(p)} runs {_human_secs(secs)}, over the "
+                f"{_human_secs(MAX_SOURCE_SECONDS)} limit")
+    return paths
+
+
+def prune_cache(ttl_hours=None, dirpath=None):
+    """Delete cached downloads older than the TTL. Returns what it removed.
+
+    Only folders this module named (the CACHE_PREFIX ones) are touched, so a
+    pipeline task's own media directory is never swept out from under it.
+    """
+    import shutil
+    import time as _time
+
+    ttl = (MEDIA_TTL_HOURS if ttl_hours is None else ttl_hours) * 3600
+    root = dirpath or MEDIA_DIR
+    removed = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return removed
+    for name in names:
+        if not name.startswith(CACHE_PREFIX):
+            continue
+        path = os.path.join(root, name)
+        try:
+            if os.path.isdir(path) and _time.time() - os.path.getmtime(path) > ttl:
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(name)
+        except OSError:
+            pass
+    return removed
+
 
 def _task_dir(task_id):
     d = os.path.join(MEDIA_DIR, str(task_id))
@@ -57,6 +167,15 @@ def fetch_youtube(url, task_id):
     if YTDLP_COOKIES:
         opts["cookiefile"] = YTDLP_COOKIES
     with yt_dlp.YoutubeDL(opts) as ydl:
+        # metadata first: a duration check here costs a second, the same check
+        # after the fact costs the whole download
+        probe = ydl.extract_info(url, download=False)
+        secs = (probe or {}).get("duration") or 0
+        if secs and secs > MAX_SOURCE_SECONDS:
+            raise SourceTooBig(
+                f"that video runs {_human_secs(secs)}, over the "
+                f"{_human_secs(MAX_SOURCE_SECONDS)} limit — send a shorter one "
+                f"or trim it first")
         info = ydl.extract_info(url, download=True)
         path = ydl.prepare_filename(info)
         # after merge the extension is mp4 regardless of source ext
@@ -113,7 +232,7 @@ def fetch(source_type, url, task_id):
     if fn is None:
         raise ValueError(f"unsupported footage source: {source_type}")
     files = fn(url, task_id)
-    return [f for f in files if VIDEO_EXT.search(f or "")]
+    return enforce_limits([f for f in files if VIDEO_EXT.search(f or "")])
 
 
 def heatmap_for(video_path):
@@ -186,4 +305,43 @@ if __name__ == "__main__":
         raise AssertionError("should have raised")
     except ValueError:
         pass
+    # cache keys are stable per URL and distinct across URLs
+    assert cache_tag("https://youtu.be/a") == cache_tag("https://youtu.be/a")
+    assert cache_tag("https://youtu.be/a") != cache_tag("https://youtu.be/b")
+    assert cache_tag("x").startswith(CACHE_PREFIX)
+
+    # the sweeper only touches folders this module named
+    import shutil as _sh
+    import tempfile as _tf
+    import time as _t
+    _root = _tf.mkdtemp()
+    for _n in (cache_tag("old"), cache_tag("new"), "7", "task_9"):
+        os.makedirs(os.path.join(_root, _n))
+    _old = os.path.join(_root, cache_tag("old"))
+    os.utime(_old, (_t.time() - 99 * 3600,) * 2)
+    _gone = prune_cache(ttl_hours=24, dirpath=_root)
+    assert _gone == [cache_tag("old")], _gone
+    _left = sorted(os.listdir(_root))
+    assert "7" in _left and "task_9" in _left, "swept a pipeline directory"
+    assert cache_tag("new") in _left, "swept a fresh download"
+    _sh.rmtree(_root, ignore_errors=True)
+
+    # oversize input is refused by name, not by crashing later
+    _big = os.path.join(_tf.mkdtemp(), "huge.mp4")
+    open(_big, "wb").write(b"0" * 2048)
+    _saved = MAX_SOURCE_BYTES
+    try:
+        MAX_SOURCE_BYTES = 1024
+        try:
+            enforce_limits([_big])
+            raise AssertionError("oversize file accepted")
+        except SourceTooBig as e:
+            assert "KB" not in str(e) and "limit" in str(e), e
+    finally:
+        MAX_SOURCE_BYTES = _saved
+
+    # the duration guard actually bites when a probe is available
+    _probe = probe_seconds(os.path.join(_BASE, "does-not-exist.mp4"))
+    assert _probe is None, "probing a missing file should return None"
+
     print("fetch.py self-check OK")

@@ -236,6 +236,43 @@ _Dalmislave_
 
 ---
 
+## v0.2.3 — hardening the agent path
+
+Three things that decide whether `job.py` can be pointed at a chat channel
+where anyone can paste a link.
+
+**Downloads are keyed by URL, not by run.** Every job used the same folder, and
+a Drive fetch walks its whole directory — so the second job picked up the first
+job's file. Verified before the fix: two jobs, `max(files, key=getsize)`
+returned the previous job's video. Keying by a hash of the URL fixes that and
+buys something back: the same link retried with a different style reuses its
+download *and* its cached transcript instead of paying for both again. Cached
+folders are swept by age (`CLIPPER_MEDIA_TTL_HOURS`, default 24), and the sweep
+only touches folders it named, so a pipeline task's media is never pulled out
+from under it.
+
+**Input limits.** There were none. A three-hour link meant gigabytes down, an
+hour of whisper, and a render behind it. A YouTube link is now checked against
+`CLIPPER_MAX_SOURCE_SECONDS` (default 60 min) from its metadata *before* the
+download, and everything is checked for size (`CLIPPER_MAX_SOURCE_GB`, default
+2) and duration after. The refusal names the actual and the allowed in units
+that read at whatever the limit is set to, because that message goes straight
+back to whoever sent the link.
+
+If the duration cannot be probed — ffmpeg missing from PATH — the limit is
+skipped, but loudly. It used to be skipped in silence, which is the worse
+failure: a Drive link has no other guard.
+
+**One job at a time per host.** Whisper and ffmpeg each want most of a small
+VPS; two in parallel do not run twice as fast, they run out of memory. A second
+request exits `3` with `{"busy": true}` and no failure report — it is not a
+fault of that job, and the caller should retry rather than escalate. `--wait N`
+blocks instead, for callers that would rather queue.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
@@ -258,6 +295,8 @@ Read this before relying on the pipeline unattended.
   stepping back for it.
 - **`job.py` has no Discord side.** It renders and returns JSON; delivering the
   file and holding the conversation are the agent's.
+- **No queue.** A busy host refuses rather than holding the request; whether
+  that is right depends on how the agent handles a retry.
 - **Downloading is untested in CI.** The routing and the error shape are
   covered, but no test actually reaches YouTube or Drive; `python fetch.py URL`
   on a real host is the check.
