@@ -145,9 +145,8 @@ def catalogue():
 def _fetch_one(url, tag):
     """Download one link to its own folder. Returns the biggest video file."""
     import fetch
-    from clippo import classify_source
 
-    kind = classify_source(url)
+    kind = fetch.classify_source(url)
     if kind not in fetch.ROUTES:
         raise ValueError(
             f"{tag}: {kind} links are not supported yet — send a YouTube or "
@@ -202,6 +201,15 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         _log("choosing a segment...")
         picks = selector.pick_topical_segments(words, platform, 1,
                                                video_duration=info["duration"])
+        if not picks:
+            # Same ladder the pipeline uses: an unreachable router costs the
+            # topic-aware cut, not the clip. Without this a 9Router hiccup
+            # takes the whole chat flow down.
+            _log("topical selection unavailable — falling back to heatmap")
+            heat = fetch.heatmap_for(content)
+            picks = [{"start": s, "end": e, "hook": None}
+                     for s, e in selector.pick_segments(
+                         info["duration"], heat, words, platform, 1)]
         if not picks:
             raise RuntimeError(
                 f"could not find a self-contained {lo}-{hi}s segment — pass "

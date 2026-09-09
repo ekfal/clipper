@@ -313,6 +313,32 @@ _Dalmislave_
 
 ---
 
+## v0.2.5 — the render path stands on its own
+
+Confirming what the agent path actually needs, and cutting what it does not.
+
+`classify_source` moved from `clippo.py` to `fetch.py`. It decides which
+downloader a link belongs to, so it belongs with the routing table; leaving it
+in the Clippo adapter meant anything wanting to download a link imported a
+campaign-platform module to find out how. `clippo.py` re-exports it, so the
+adapter contract is unchanged.
+
+`job.py` now falls back to heatmap selection when the router is unreachable,
+the same ladder `pipeline.py` has always had. It used to raise instead, which
+made a 9Router hiccup take the whole chat flow down for something it could
+still have produced.
+
+Demonstrated with the router hard-failing on every call: the clip still renders
+— topical selection degrades to heatmap, metadata degrades to transcript-derived
+copy, music still lands. And with `job.py` loaded and a job run, none of
+`clippo`, `playwright`, `db`, `sqlite3`, `accounts`, `pipeline` or
+`upload_youtube` is imported at all. The render path touches no campaign
+platform, no database and no upload credentials.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.

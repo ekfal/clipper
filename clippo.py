@@ -11,7 +11,6 @@ accepts only TikTok/IG URLs; wired once those platforms are live).
 import html
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
 
 APP_BASE = "https://app.clippo.id"
 API_BASE = f"{APP_BASE}/api/proxy"
@@ -43,15 +42,13 @@ class Task:
 
 
 def classify_source(url: str) -> str:
-    """Route footage URL to a downloader family. fetch.py (M2) consumes this."""
-    host = urlparse(url).netloc.lower()
-    if "youtube.com" in host or "youtu.be" in host:
-        return "youtube"
-    if "drive.google.com" in host:
-        return "gdrive"
-    if "cdn.discordapp.com" in host:
-        return "discord"
-    return "unknown"
+    """Route a footage URL to a downloader family.
+
+    Moved to fetch.py, which owns the routing table; re-exported here because
+    the adapter contract still uses it during discovery.
+    """
+    import fetch
+    return fetch.classify_source(url)
 
 
 def _strip_html(s: str) -> str:

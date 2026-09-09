@@ -221,6 +221,24 @@ def fetch_gdrive(url, task_id):
 
 ROUTES = {"youtube": fetch_youtube, "gdrive": fetch_gdrive}
 
+
+def classify_source(url):
+    """Which downloader a link belongs to. Lives here, with the routing table.
+
+    It used to live in clippo.py, which meant anything wanting to download a
+    link imported the Clippo adapter to find out how — a campaign-platform
+    module has no business owning that.
+    """
+    from urllib.parse import urlparse
+    host = urlparse(url).netloc.lower()
+    if "youtube.com" in host or "youtu.be" in host:
+        return "youtube"
+    if "drive.google.com" in host:
+        return "gdrive"
+    if "cdn.discordapp.com" in host:
+        return "discord"
+    return "unknown"
+
 # Video extensions worth processing downstream; Drive folders often carry
 # briefs (pdf/docx) alongside footage — those are skipped, not errors.
 VIDEO_EXT = re.compile(r"\.(mp4|mov|mkv|webm|avi|m4v)$", re.I)
@@ -298,6 +316,10 @@ if __name__ == "__main__":
 
     # Self-check: routing + video filter, no network.
     assert ROUTES["youtube"] is fetch_youtube and ROUTES["gdrive"] is fetch_gdrive
+    assert classify_source("https://youtu.be/x") == "youtube"
+    assert classify_source("https://drive.google.com/file/d/x/view") == "gdrive"
+    assert classify_source("https://cdn.discordapp.com/a.mp4") == "discord"
+    assert classify_source("https://vimeo.com/1") == "unknown"
     assert VIDEO_EXT.search("a/b/clip.MOV") and VIDEO_EXT.search("x.mp4")
     assert not VIDEO_EXT.search("brief.pdf") and not VIDEO_EXT.search("notes.docx")
     try:
