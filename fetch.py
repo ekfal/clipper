@@ -366,4 +366,110 @@ if __name__ == "__main__":
     _probe = probe_seconds(os.path.join(_BASE, "does-not-exist.mp4"))
     assert _probe is None, "probing a missing file should return None"
 
+    # --- the YouTube path, exercised against a stubbed yt-dlp ---------------
+    # The network is the one thing no test here can reach, so everything around
+    # it is driven instead: the pre-download duration refusal, the merged-
+    # extension fallback, the heatmap sidecar and the low-resolution warning.
+    import types as _types
+    _calls = []
+
+    class _FakeYDL:
+        info = {}
+        writes = None
+
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=False):
+            _calls.append(download)
+            if download and _FakeYDL.writes:
+                open(_FakeYDL.writes, "w").close()
+            return dict(_FakeYDL.info)
+
+        def prepare_filename(self, info):
+            return os.path.join(_task_dir(_FakeYDL.tag),
+                                f"{info['id']}.{info.get('ext', 'mp4')}")
+
+    _fake = _types.ModuleType("yt_dlp")
+    _fake.YoutubeDL = _FakeYDL
+    _saved_mod = sys.modules.get("yt_dlp")
+    sys.modules["yt_dlp"] = _fake
+    _saved_media = MEDIA_DIR
+    MEDIA_DIR = _tf.mkdtemp()
+    try:
+        # a video past the limit is refused before anything is downloaded
+        _FakeYDL.tag, _FakeYDL.info = "t1", {"id": "long", "duration": 9999}
+        _FakeYDL.writes = None
+        _calls.clear()
+        try:
+            fetch_youtube("https://youtu.be/long", "t1")
+            raise AssertionError("an over-long video was accepted")
+        except SourceTooBig as e:
+            assert "over the" in str(e), e
+        assert _calls == [False], f"it downloaded before checking: {_calls}"
+
+        # a normal video: sidecar written, merged extension resolved
+        _FakeYDL.tag = "t2"
+        _d2 = _task_dir("t2")
+        _FakeYDL.info = {"id": "ok", "ext": "webm", "duration": 120,
+                         "height": 1080,
+                         "heatmap": [{"start_time": 1.0, "value": 0.9}]}
+        _FakeYDL.writes = os.path.join(_d2, "ok.mp4")   # merged output
+        _calls.clear()
+        _got = fetch_youtube("https://youtu.be/ok", "t2")
+        assert _calls == [False, True], _calls
+        assert _got == [os.path.join(_d2, "ok.mp4")], _got
+        with open(os.path.join(_d2, "ok.heatmap.json")) as f:
+            assert json.load(f)[0]["value"] == 0.9
+        assert heatmap_for(_got[0])[0]["start_time"] == 1.0
+
+        # no heatmap offered -> no sidecar, and that is not an error
+        _FakeYDL.tag = "t3"
+        _d3 = _task_dir("t3")
+        _FakeYDL.info = {"id": "bare", "ext": "mp4", "duration": 60, "height": 360}
+        _FakeYDL.writes = os.path.join(_d3, "bare.mp4")
+        assert fetch_youtube("https://youtu.be/bare", "t3") == [_FakeYDL.writes]
+        assert not os.path.exists(os.path.join(_d3, "bare.heatmap.json"))
+        assert heatmap_for(_FakeYDL.writes) is None
+    finally:
+        MEDIA_DIR = _saved_media
+        if _saved_mod is None:
+            sys.modules.pop("yt_dlp", None)
+        else:
+            sys.modules["yt_dlp"] = _saved_mod
+
+    # --- the Drive path, against a stubbed gdown ---------------------------
+    _gd = _types.ModuleType("gdown")
+    _saved_gd = sys.modules.get("gdown")
+    sys.modules["gdown"] = _gd
+    _saved_media = MEDIA_DIR
+    MEDIA_DIR = _tf.mkdtemp()
+    try:
+        # a folder share: the brief alongside the footage is filtered out, and
+        # a partial download is still a result rather than a failure
+        def _folder(url=None, output=None, **kw):
+            open(os.path.join(output, "clip.MOV"), "w").close()
+            open(os.path.join(output, "brief.pdf"), "w").close()
+            raise RuntimeError("too many accesses")     # mid-folder rate limit
+        _gd.download_folder = _folder
+        _gd.download = lambda url=None, output=None, **kw: None
+        _got = fetch("gdrive", "https://drive.google.com/drive/folders/x", "g1")
+        assert [os.path.basename(p) for p in _got] == ["clip.MOV"], _got
+
+        # a single file share that Drive refuses returns nothing, not a crash
+        _gd.download = lambda url=None, output=None, **kw: None
+        assert fetch("gdrive", "https://drive.google.com/file/d/x/view", "g2") == []
+    finally:
+        MEDIA_DIR = _saved_media
+        if _saved_gd is None:
+            sys.modules.pop("gdown", None)
+        else:
+            sys.modules["gdown"] = _saved_gd
+
     print("fetch.py self-check OK")

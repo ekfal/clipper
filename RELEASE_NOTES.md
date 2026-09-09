@@ -339,6 +339,40 @@ _Dalmislave_
 
 ---
 
+## v0.2.6 — the download path is exercised, not just described
+
+The downloader is `fetch.py`. There is no `download.py` — that was the old
+"Clipper Gemini" name, and nothing in this repo answers to it.
+
+Until now the network stages were the untested half: routing and the file
+filter were covered, but `fetch_youtube` and `fetch_gdrive` themselves had
+never run, in CI or anywhere. That mattered more than usual because v0.2.3 put
+a duration pre-check inside `fetch_youtube` — new code on the one path nothing
+executed.
+
+Both are now driven against stubbed `yt_dlp` and `gdown` modules. What that
+actually covers:
+
+* an over-long video is refused **before** the download — asserted by checking
+  yt-dlp was called once with `download=False` and never with `download=True`;
+* the merged-extension fallback, where yt-dlp reports `.webm` and the file on
+  disk is the muxed `.mp4`;
+* the heatmap sidecar being written, and read back by `heatmap_for`;
+* no heatmap offered meaning no sidecar, which is not an error;
+* the 360p warning firing when a download comes back under 720p;
+* a Drive folder that rate-limits mid-way still returning what landed, with the
+  brief PDF filtered out of the footage;
+* a Drive file share that returns nothing coming back empty rather than
+  crashing.
+
+What this still does not cover, and cannot from here: the network itself.
+Cookies, PO tokens and a host's reputation with YouTube are only testable on
+the host. `python fetch.py URL` is that test.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
@@ -357,9 +391,10 @@ Read this before relying on the pipeline unattended.
   file and holding the conversation are the agent's.
 - **No queue.** A busy host refuses rather than holding the request; whether
   that is right depends on how the agent handles a retry.
-- **Downloading is untested in CI.** The routing and the error shape are
-  covered, but no test actually reaches YouTube or Drive; `python fetch.py URL`
-  on a real host is the check.
+- **The network itself is untested.** The download logic is driven against
+  stubbed yt-dlp and gdown, but nothing here reaches YouTube or Drive; cookies,
+  PO tokens and IP reputation are only testable on the host, with
+  `python fetch.py URL`.
 
 ---
 
