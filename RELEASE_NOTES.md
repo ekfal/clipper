@@ -544,6 +544,40 @@ _Dalmislave_
 
 ---
 
+## v0.3.1 - the renderer stops working on a newer ffmpeg
+
+Found while trying to render a clip on a 2026 ffmpeg build: **every render
+fails on ffmpeg 8**, with nothing useful to go on.
+
+```
+RuntimeError: ffmpeg failed: Unrecognized option 'filter_complex_script'.
+```
+
+ffmpeg 8 dropped `-filter_complex_script` for the generic `-/filter_complex`.
+`edit.py` had the old spelling hardcoded, so the day a box upgrades ffmpeg the
+pipeline stops rendering, and the error names an option rather than the
+problem. Nothing about the failure suggests "your ffmpeg is too new".
+
+The graph still has to come from a file, because one caption is one overlay
+input and the command line would otherwise hit the OS argument limit. Only the
+spelling was in question, so the binary is asked once and the answer cached:
+`-filter_complex_script` when `ffmpeg -h full` still lists it, otherwise
+`-/filter_complex`. Version strings were not used to decide. Distro builds,
+static builds and vendored builds all disagree about what a version means, and
+the capability is the thing that matters.
+
+Verified against both: ffmpeg n7.0.1 picks the old flag, N-126482 picks the
+new one, and a clip renders on the new one to 1080x1920 H.264 with audio.
+
+That render also settled something v0.2.8 left open. The `ffmpeg -i` banner
+parser behind `probe_video` had only ever been checked against fixtures, since
+no ffmpeg was available at the time. It now reads a live banner correctly at
+both ends of the pipeline: 1920x1080 h264 in, 1080x1920 h264 out.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.

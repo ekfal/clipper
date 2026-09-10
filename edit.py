@@ -543,6 +543,31 @@ def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
     return overlays
 
 
+_GRAPH_FLAG = None
+
+
+def _graph_flag():
+    """Which flag this ffmpeg uses to read a filter graph from a file.
+
+    ffmpeg 8 dropped -filter_complex_script for the generic -/filter_complex,
+    so a box that updates ffmpeg fails every render with "Unrecognized option"
+    and nothing else to go on. The graph has to come from a file either way
+    (see the argument-length note in render_clip), so the only question is the
+    spelling. Ask the binary once rather than guessing from a version string:
+    distro builds and static builds disagree about what a version means.
+    """
+    global _GRAPH_FLAG
+    if _GRAPH_FLAG is None:
+        try:
+            out = subprocess.run([FFMPEG, "-h", "full"], capture_output=True,
+                                 text=True, timeout=30).stdout
+        except Exception:
+            out = ""
+        _GRAPH_FLAG = ("-filter_complex_script" if "filter_complex_script" in out
+                       else "-/filter_complex")
+    return _GRAPH_FLAG
+
+
 def render_clip(video_path, start, end, words, out_path, *,
                 hook=None, split_screen=False, bgm=True, fps=FPS,
                 bitrate=BITRATE, preset=PRESET, threads=THREADS,
@@ -734,7 +759,7 @@ def render_clip(video_path, start, end, words, out_path, *,
             f.write(";".join(chains))
 
         cmd = ([FFMPEG, "-y", "-v", "error"] + inputs +
-               ["-filter_complex_script", "graph.txt",
+               [_graph_flag(), "graph.txt",
                 "-map", vlabel, "-map", "[a]",
                 "-c:v", CODEC, "-preset", preset, "-b:v", bitrate,
                 "-pix_fmt", "yuv420p", "-r", str(fps),
