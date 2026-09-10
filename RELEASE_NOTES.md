@@ -660,6 +660,41 @@ _Dalmislave_
 
 ---
 
+## v0.3.4 - no hook unless one was asked for
+
+Every clip used to get a hook, because `metadata.generate()` always writes one
+and `job.py` always passed it to the renderer. Sending only a content link
+still produced a headline over the first seconds, written by the model because
+nothing stopped it.
+
+A hook is now drawn only when something asks for one:
+
+| Given | Hook |
+|---|---|
+| `--hook "text"` | the text, over the opening clip or the content |
+| an opening link | written for it, from the topical pick or the model |
+| neither | none |
+
+The rule lives in `_hook_for()` rather than inline, because it is a contract an
+agent offers a user rather than an implementation detail, and `job.py
+--selftest` pins all seven cases along with the catalogue and the delivery cap.
+That flag is new: it checks the parts that are a promise, without touching the
+network.
+
+This costs nothing and returns something. The seconds under a hook carry no
+subtitle, since nothing is allowed to share the screen with it, so a hook
+nobody asked for was eating the opening line of speech. Rendered both ways from
+the same source and the same window: at two seconds in, the hooked version
+shows the hook and no caption, the plain one is already captioning "jadi gue
+dulu mikir bikin konten".
+
+`README.md`, `AGENTS.md` and `hermes-prompt.md` all say it now, and the
+catalogue's "direct" entry no longer describes the old behaviour.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.

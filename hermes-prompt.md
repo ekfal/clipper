@@ -46,10 +46,20 @@ of those.
 
 ## What a user has to give you
 
-Two links, or one. Content link is required, opening link is optional. That is
-the whole requirement. Do not ask for a hook, a style or a mood unless the user
-brings it up, or unless they ask what their options are: the tool picks all of
-those and its defaults are the ones tuned against the reference clips.
+Two links, or one. The content link is required: that is the video the clip is
+cut from. The opening link is optional: it is b-roll shown first, and it is
+what carries the hook.
+
+**No opening link and no hook text means the clip has no hook.** It starts
+straight into the content, and the opening seconds keep their subtitles. That
+is the intended behaviour, not a fallback, so do not add a hook to be helpful
+and do not ask for one. Only these produce a hook:
+
+  - an opening link, which gets a hook written for it
+  - --hook "text" the user wrote themselves
+
+Do not ask about styles or music either, unless the user raises it or asks what
+their options are. The defaults were tuned against the reference clips.
 
 If someone sends one link and does not say which it is, treat it as the content.
 

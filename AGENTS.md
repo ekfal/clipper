@@ -11,7 +11,9 @@ The short version for an agent asked to make a clip:
 2. `python job.py --list` prints the catalogue as JSON: caption styles, hook
    styles, frame modes and the music moods available on this box.
 3. `python job.py --opening URL --content URL` renders and prints a JSON result
-   holding the output path.
+   holding the output path. The opening link is optional and carries the hook;
+   with neither it nor `--hook "text"`, the clip has no hook, which is the
+   intended result rather than a fallback.
 
 `job.py` is the contract. It prints JSON on stdout and progress on stderr, so
 you never parse a traceback to tell the user what happened. Exit `3` with

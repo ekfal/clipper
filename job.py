@@ -123,8 +123,10 @@ def catalogue():
              "desc": "Second link plays first with the hook over it, then cuts "
                      "to the content. Nothing of the speech is lost."},
             {"id": "direct", "label": "Straight in",
-             "desc": "Hook rides over the opening seconds of the content. Those "
-                     "seconds carry no subtitle."},
+             "desc": "No opening clip. The content starts straight away with no "
+                     "hook, unless you write hook text yourself, in which case "
+                     "it rides over the first seconds and those carry no "
+                     "subtitle."},
         ],
         "moods": list(bgm.MOODS),
         "music": [{"file": t["file"], "mood": t["mood"] or ["untagged"]}
@@ -165,6 +167,24 @@ def _fetch_one(url, tag):
         raise RuntimeError(f"{tag}: nothing downloadable at that link")
     return max(files, key=os.path.getsize)
 
+
+
+def _hook_for(asked, opening, topical, from_model):
+    """Which hook text ends up on the clip, or None for no hook at all.
+
+    A hook is drawn only when something asks for one: hook text the caller
+    wrote, or an opening clip that needs text over it. With neither, the clip
+    has no hook, rather than one the model wrote because it could.
+
+    That is not only a style call. The seconds under a hook carry no subtitle,
+    because nothing is allowed to share the screen with it, so a hook nobody
+    asked for costs the opening line of speech.
+    """
+    if asked:
+        return asked
+    if opening:
+        return topical or from_model
+    return None
 
 
 def _delivery_copy(path, max_mb):
@@ -264,10 +284,7 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     seg_words = selector.words_in(words, seg_start, seg_end)
     seg_text = " ".join(w["word"] for w in seg_words)
     meta = metadata.generate(seg_text, {}, platform=platform)
-    if hook:
-        meta["hook"] = hook
-    elif topic_hook:
-        meta["hook"] = topic_hook
+    meta["hook"] = _hook_for(hook, opening, topic_hook, meta["hook"])
 
     track, why = bgm.pick(mood or meta.get("mood"), key=f"job:{int(seg_start)}")
     _log(f"bgm: {why}")
@@ -302,13 +319,51 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     }
 
 
+def _selftest():
+    """Offline checks on the parts that are a contract, not an implementation."""
+    # The hook rule the catalogue promises.
+    assert _hook_for("Ditulis Tangan", None, "topical", "model") == "Ditulis Tangan"
+    assert _hook_for("Ditulis Tangan", "/broll.mp4", "topical", "model") == "Ditulis Tangan"
+    assert _hook_for(None, "/broll.mp4", "topical", "model") == "topical"
+    assert _hook_for(None, "/broll.mp4", None, "model") == "model"
+    # No opening and no text asked for: no hook, whatever the model wrote.
+    assert _hook_for(None, None, "topical", "model") is None
+    assert _hook_for(None, None, None, "model") is None
+    assert _hook_for("", None, None, "model") is None
+
+    # The catalogue is what an agent offers a user, so every id it advertises
+    # has to be one the parser actually accepts.
+    cat = catalogue()
+    parser_choices = {
+        "frame_mode": ("cover", "fill", "fit"),
+        "caption_style": ("phrase", "karaoke"),
+        "hook_style": ("boxes", "card"),
+    }
+    for key, allowed in parser_choices.items():
+        ids = [o["id"] for o in cat[key]]
+        assert set(ids) <= set(allowed), (key, ids, allowed)
+    for key, value in cat["defaults"].items():
+        if key in parser_choices:
+            assert value in parser_choices[key], (key, value)
+
+    # A delivery copy is only made when one is needed.
+    assert _delivery_copy("/nonexistent.mp4", 0) is None
+
+    print(json.dumps({"ok": True, "checked": "hook rule, catalogue, delivery cap"}))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="job.py", description=__doc__)
+    p.add_argument("--selftest", action="store_true",
+                   help="check the contract without touching the network")
     p.add_argument("--list", action="store_true",
                    help="print the catalogue of styles and music, then exit")
     p.add_argument("--content", help="link to the video the clip is cut from")
     p.add_argument("--opening", help="link to the b-roll shown first (optional)")
-    p.add_argument("--hook", help="hook text; **bold** with double asterisks")
+    p.add_argument("--hook", help="hook text; **bold** with double asterisks. "
+                                  "Without this and without --opening the clip "
+                                  "gets no hook at all")
     p.add_argument("--platform", default="youtube",
                    help="destination, sets the length window")
     p.add_argument("--start", type=float, help="cut from here instead of letting "
@@ -329,6 +384,8 @@ def main(argv=None):
                         "(Discord: 10 free, 50 Nitro Basic)")
     a = p.parse_args(argv)
 
+    if a.selftest:
+        return _selftest()
     if a.list:
         print(json.dumps(catalogue(), indent=2, ensure_ascii=False))
         return 0

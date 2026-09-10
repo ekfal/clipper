@@ -44,6 +44,11 @@ python job.py --list           # styles, frame modes and music, as JSON
 python job.py --opening OPENING_URL --content CONTENT_URL
 ```
 
+The opening link is optional and it is what carries the hook. Without it, and
+without `--hook "text"`, the clip has no hook at all: it starts straight into
+the content and the opening seconds keep their subtitles, which a hook would
+otherwise cover.
+
 `job.py` prints JSON on stdout and progress on stderr, so a caller never has to
 parse a traceback. A failure prints `{"ok": false, "error": ...}` and files a
 diagnostic report whose path comes back in the same JSON.
