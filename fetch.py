@@ -34,6 +34,21 @@ YTDLP_COOKIES = os.environ.get("CLIPPER_YT_COOKIES") or (
 )
 MIN_GOOD_HEIGHT = 720
 
+# Ceiling on what to fetch. This is NOT the 360p question — that one is
+# authentication, and cookies settle it. This is the format ladder: YouTube
+# only publishes H.264 up to 1080p, so asking for mp4 specifically caps you
+# there no matter how good the source is. Everything above 1080p exists as VP9
+# or AV1 in webm.
+#
+# It matters because cover mode crops a landscape source to 9:16, and the crop
+# throws away most of the width before the canvas is filled:
+#   1080p -> 607x1080 crop  -> upscaled 1.78x to 1080x1920   (soft)
+#   1440p -> 810x1440 crop  -> upscaled 1.33x
+#   2160p -> 1215x2160 crop -> downscaled 1.12x              (sharp)
+# 1440 is the default: visibly better than 1080p through a crop, without the
+# file size 2160p brings against CLIPPER_MAX_SOURCE_GB.
+MAX_HEIGHT = int(os.environ.get("CLIPPER_MAX_HEIGHT", "1440"))
+
 # Input limits. Anyone who can send a link can otherwise hand the box a
 # three-hour upload: gigabytes to download, an hour of whisper, and a render
 # behind it. Refusing early with a reason costs the sender one message; not
@@ -157,7 +172,11 @@ def fetch_youtube(url, task_id):
 
     out_dir = _task_dir(task_id)
     opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        # No ext filter: pinning mp4 pins H.264, which YouTube stops at 1080p.
+        # "<=?" is a preference, not a requirement — a video published only
+        # above the cap still downloads rather than failing to match.
+        "format": (f"bestvideo[height<=?{MAX_HEIGHT}]+bestaudio/"
+                   f"best[height<=?{MAX_HEIGHT}]/best"),
         "outtmpl": os.path.join(out_dir, "%(id)s.%(ext)s"),
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -413,6 +432,24 @@ if __name__ == "__main__":
         except SourceTooBig as e:
             assert "over the" in str(e), e
         assert _calls == [False], f"it downloaded before checking: {_calls}"
+
+        # the selector must carry the height cap and must not pin a container
+        _seen = {}
+
+        class _Opts(_FakeYDL):
+            def __init__(self, opts):
+                _seen.update(opts)
+                super().__init__(opts)
+
+        _fake.YoutubeDL = _Opts
+        _FakeYDL.tag = "t_fmt"
+        _FakeYDL.info = {"id": "f", "ext": "mp4", "duration": 10}
+        _FakeYDL.writes = os.path.join(_task_dir("t_fmt"), "f.mp4")
+        fetch_youtube("https://youtu.be/f", "t_fmt")
+        assert f"height<=?{MAX_HEIGHT}" in _seen["format"], _seen["format"]
+        assert "ext=mp4" not in _seen["format"], (
+            "pinning mp4 pins H.264 and caps the download at 1080p")
+        _fake.YoutubeDL = _FakeYDL
 
         # a normal video: sidecar written, merged extension resolved
         _FakeYDL.tag = "t2"

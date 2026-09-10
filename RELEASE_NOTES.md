@@ -373,6 +373,44 @@ _Dalmislave_
 
 ---
 
+## v0.2.7 — stop capping the download at 1080p
+
+360p is an authentication question, not a limit: YouTube serves it to
+unauthenticated requests, and `cookies.txt` opens the full ladder. That was
+already documented and is unchanged.
+
+The real cap was in the format selector, which asked for
+`bestvideo[ext=mp4]`. YouTube only publishes H.264 up to 1080p — everything
+above that exists as VP9 or AV1 in webm — so pinning the container pinned the
+resolution, cookies or not.
+
+That matters because cover mode crops a landscape source to 9:16 and throws
+away most of the width before filling the canvas:
+
+| source | after the 9:16 crop | to 1080x1920 |
+|---|---|---|
+| 1080p | 607x1080 | upscaled 1.78x |
+| 1440p | 810x1440 | upscaled 1.33x |
+| 2160p | 1215x2160 | downscaled 1.12x |
+
+A 1080p source is being blown up nearly twice over. The selector now caps by
+height instead of container, defaulting to `CLIPPER_MAX_HEIGHT=1440` —
+visibly better through a crop without the file size 2160p brings against
+`CLIPPER_MAX_SOURCE_GB`. The `<=?` is a preference, so a video published only
+above the cap still downloads rather than failing to match.
+
+The stub test pins both halves: the selector must carry the height cap, and
+must not name a container. Re-pinning mp4 for tidiness would silently put the
+1080p ceiling back, so it fails the test instead.
+
+Merged output may now be mkv when the best pair cannot go in mp4. That is
+already handled — mkv is in the accepted extensions, and the renderer
+re-encodes everything anyway.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
