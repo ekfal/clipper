@@ -63,6 +63,11 @@ def main():
     import fetch
     check("yt cookies (else 360p only)", bool(fetch.YTDLP_COOKIES),
           fetch.YTDLP_COOKIES or "missing — clips will be built from 360p")
+    # Informational: cookies decide whether the ladder opens at all, this
+    # decides how far up it is climbed. Cover mode crops a landscape source to
+    # 9:16, so anything under 1440p is upscaled to fill the canvas.
+    check("source ceiling", True,
+          f"{fetch.MAX_HEIGHT}p (CLIPPER_MAX_HEIGHT)")
 
     import ai
     try:
@@ -128,7 +133,13 @@ def main():
             check("sample download", False, str(e)[:120])
             return
     video = max(videos, key=os.path.getsize)
-    print(f"\nusing {os.path.basename(video)}")
+    vinfo = fetch.probe_video(video)
+    print(f"\nusing {os.path.basename(video)}"
+          + (f" — {vinfo['width']}x{vinfo['height']} {vinfo['codec']}" if vinfo else ""))
+    if vinfo and vinfo["height"] < fetch.MIN_GOOD_HEIGHT:
+        check("sample resolution", False,
+              f"{vinfo['height']}p — a 9:16 crop of this is upscaled past 2x "
+              f"and will look soft; check cookies.txt")
 
     import transcribe
     t = time.time()

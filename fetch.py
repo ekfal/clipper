@@ -93,6 +93,43 @@ def probe_seconds(path):
     return int(h) * 3600 + int(mnt) * 60 + float(s)
 
 
+def _video_from_banner(text):
+    """Pull codec and pixel size out of an `ffmpeg -i` banner. {} if absent.
+
+    Kept apart from the subprocess call so the parsing — the part that breaks
+    when ffmpeg reformats a line — is checkable without a video on disk.
+    """
+    for line in text.splitlines():
+        if ": Video:" not in line:
+            continue
+        codec = re.search(r": Video: (\w+)", line)
+        size = re.search(r"[ ,](\d{2,5})x(\d{2,5})(?=[ ,\]]|$)", line)
+        if size:
+            return {"codec": codec.group(1) if codec else "",
+                    "width": int(size.group(1)), "height": int(size.group(2))}
+    return {}
+
+
+def probe_video(path):
+    """Codec and pixel size of a file's video stream; {} when unreadable.
+
+    Reads the same `ffmpeg -i` banner as probe_seconds, and for the same
+    reason: a static ffmpeg build often ships without ffprobe beside it.
+
+    This is what answers "did the download actually come down at full
+    resolution" — MAX_HEIGHT says what was asked for, this says what arrived.
+    """
+    import subprocess
+
+    import edit
+    try:
+        out = subprocess.run([edit.FFMPEG, "-i", path], capture_output=True,
+                             text=True, timeout=30).stderr
+    except Exception:
+        return {}
+    return _video_from_banner(out)
+
+
 def _human_bytes(n):
     return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
 
@@ -293,7 +330,6 @@ def _cli(argv):
     """
     import json as _json
     import sys as _sys
-    from clippo import classify_source
 
     url = argv[0]
     kind = classify_source(url)
@@ -320,9 +356,14 @@ def _cli(argv):
         entry = {"path": os.path.abspath(f), "size_bytes": os.path.getsize(f)}
         side = os.path.splitext(f)[0] + ".heatmap.json"
         entry["heatmap"] = os.path.exists(side)
+        entry.update(probe_video(f))
         out.append(entry)
+    # max_height next to the height that arrived: together they say whether the
+    # ceiling or the source decided the quality, which is the one thing this
+    # command is run to find out.
     print(_json.dumps({"ok": True, "url": url, "kind": kind,
-                       "cookies": bool(YTDLP_COOKIES), "files": out},
+                       "cookies": bool(YTDLP_COOKIES), "max_height": MAX_HEIGHT,
+                       "files": out},
                       indent=2, ensure_ascii=False))
     return 0
 
@@ -339,6 +380,25 @@ if __name__ == "__main__":
     assert classify_source("https://drive.google.com/file/d/x/view") == "gdrive"
     assert classify_source("https://cdn.discordapp.com/a.mp4") == "discord"
     assert classify_source("https://vimeo.com/1") == "unknown"
+    # the banner parser: a real ffmpeg -i dump, and the shapes that trip it
+    _banner = """Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'ok.mp4':
+  Duration: 00:12:03.44, start: 0.000000, bitrate: 4210 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(tv, bt709), 2560x1440 [SAR 1:1 DAR 16:9], 4074 kb/s, 30 fps, 30 tbr, 15360 tbn
+  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, stereo, fltp, 128 kb/s"""
+    _v = _video_from_banner(_banner)
+    # the SAR/DAR ratios sit right next to the resolution; picking one of those
+    # up instead would report a 1x1 video and look like a download failure
+    assert _v == {"codec": "h264", "width": 2560, "height": 1440}, _v
+    _vp9 = _video_from_banner(
+        "  Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 1080x1920, 30 fps, 30 tbr")
+    assert _vp9 == {"codec": "vp9", "width": 1080, "height": 1920}, _vp9
+    # some builds end the line at the resolution, with nothing after it
+    assert _video_from_banner(
+        "  Stream #0:0: Video: av1, yuv420p, 3840x2160")["height"] == 2160
+    # audio-only, or a banner ffmpeg never printed, is missing data not a crash
+    assert _video_from_banner("  Stream #0:1: Audio: aac, 44100 Hz, stereo") == {}
+    assert _video_from_banner("") == {}
+
     assert VIDEO_EXT.search("a/b/clip.MOV") and VIDEO_EXT.search("x.mp4")
     assert not VIDEO_EXT.search("brief.pdf") and not VIDEO_EXT.search("notes.docx")
     try:

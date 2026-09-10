@@ -411,6 +411,49 @@ _Dalmislave_
 
 ---
 
+## v0.2.8 — the download says what it actually got
+
+v0.2.7 raised the ceiling to 1440p but left no way to see whether the ceiling
+or the source decided the result. `python fetch.py URL` reported a path and a
+byte count; a 1080p download and a 1440p one look the same in bytes unless you
+already know the video.
+
+The CLI now reports resolution. Each file comes back with `width`, `height`
+and `codec`, and the envelope carries `max_height` — the ceiling that was
+asked for, next to the height that arrived. Those two numbers together are the
+whole diagnosis: equal means the cap decided it, lower means the source did,
+360p means cookies are not being read.
+
+```json
+{ "ok": true, "kind": "youtube", "cookies": true, "max_height": 1440,
+  "files": [ { "path": "...", "size_bytes": 214_000_000,
+               "codec": "vp9", "width": 2560, "height": 1440 } ] }
+```
+
+`preflight.py` reports the same thing: the configured ceiling as its own line,
+and the resolution of whatever sample it ends up using. A sample under 720p
+now fails a check rather than passing quietly — through a 9:16 crop that is an
+upscale past 2x, which is the soft-looking output this whole thread started
+from.
+
+Both read it out of the `ffmpeg -i` banner rather than calling ffprobe, for the
+same reason `probe_seconds` does: a static ffmpeg build often ships without
+ffprobe beside it. When ffmpeg is missing the fields are simply absent — the
+download is still reported, since not knowing the resolution is not a reason to
+call a successful download a failure.
+
+**What is not proven.** The banner parser is checked against fixture output
+(h264 with SAR/DAR trailing the resolution, VP9, AV1, audio-only, empty), not
+against a live ffmpeg — this environment has neither ffmpeg nor network. The
+SAR/DAR case is the one worth knowing about: `2560x1440 [SAR 1:1 DAR 16:9]`
+puts two more ratio-shaped tokens right after the resolution, and a parser that
+grabs the wrong one reports a 1x1 video, which would read as a broken download.
+That case is pinned by the self-check.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
@@ -432,7 +475,8 @@ Read this before relying on the pipeline unattended.
 - **The network itself is untested.** The download logic is driven against
   stubbed yt-dlp and gdown, but nothing here reaches YouTube or Drive; cookies,
   PO tokens and IP reputation are only testable on the host, with
-  `python fetch.py URL`.
+  `python fetch.py URL` — which now reports the resolution it got, so one run
+  answers both whether cookies work and whether the 1440p cap took effect.
 
 ---
 
