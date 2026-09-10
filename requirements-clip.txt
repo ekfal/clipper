@@ -1,0 +1,24 @@
+# The clip path only: link in, rendered mp4 out. This is what job.py and
+# edit.py need, and nothing else.
+#
+#   pip install -r requirements-clip.txt
+#
+# System packages first, they are not pip installable:
+#   apt install ffmpeg fonts-dejavu-core fonts-noto-color-emoji
+#
+# Everything above these four is for a surface the clip path never touches:
+# uploading, the accounts dashboard, or Clippo. requirements.txt has those and
+# pulls this file in, so a dependency is defined in one place.
+
+# yt-dlp breaks whenever YouTube changes; keep it updated rather than pinned
+# tight, and see fetch.py for the cookies + PO-token setup a flagged VPS needs.
+yt-dlp>=2025.1.1
+
+# CPU-only, int8. The model itself downloads on first run (~500 MB for "small").
+faster-whisper>=1.1.0
+
+# Every overlay drawn on the frame is a PIL image.
+Pillow>=10.3.0
+
+# 9Router client. Without a key the clip still renders, with weaker copy.
+requests>=2.32.0

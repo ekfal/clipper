@@ -578,6 +578,52 @@ _Dalmislave_
 
 ---
 
+## v0.3.2 - the repo sets itself up
+
+Everything needed to clone this and get to a rendered clip is now in the repo,
+so the instructions do not have to travel separately.
+
+**`README.md`** (the repo had none). Two setup paths, because they cost very
+different amounts: the clip path needs four Python packages and no credentials
+at all, the full pipeline needs twelve plus a Clippo session and upload tokens.
+It leads with the branch warning, since `main` is around 3000 lines behind and
+does not contain `job.py`, `bgm.py` or `report.py`.
+
+**`AGENTS.md`.** The three commands an agent needs, the `job.py` contract, and
+what exit 3 means, so a busy host reads as "retry later" rather than a failure.
+
+**`.env.example`.** Every variable the code reads is either set here with a
+note, or named in the closing list with the module that owns its default. A
+check confirms none is missing. Nothing in the file is required to render a
+clip, which the file says up front.
+
+**`requirements-clip.txt`.** Four packages: yt-dlp, faster-whisper, Pillow,
+requests. `requirements.txt` pulls this file in with `-r` rather than repeating
+it, so a version is defined once. Both were resolved with `pip install
+--dry-run`, not just eyeballed.
+
+What the clip path does not need, confirmed by importing `job.py` in a
+container that has none of them: fastapi, uvicorn, python-multipart, playwright,
+gdown, and the three google packages. Every heavy import in the chain sits
+inside a function rather than at the top of a module, which is what makes that
+work.
+
+### The self-check now renders
+
+`python edit.py` used to print `smoke skipped: fetch media/3 first` on any box
+that had not already downloaded one specific video, which meant a fresh clone
+verified the layout maths and nothing else.
+
+It now builds its own source with ffmpeg when no footage is around: 1920x1080
+with an audio track, so the 9:16 crop and the amix path both do real work, then
+renders both modes. No network, no keys, no footage. On a fresh box this is the
+first command worth running, and its output says whether the machine can render
+at all.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.

@@ -908,22 +908,49 @@ if __name__ == "__main__":
             f"hook ends at {_h.y + _hh}, past footage {_video_bottom}")
     print("edit.py logic self-check OK")
 
-    # Smoke: render 5s from a fetched video, both modes. Needs media/3 present.
+    # Smoke: actually render, so the box proves it can. Uses a fetched video
+    # when one is around, and otherwise builds its own footage with ffmpeg, so
+    # this runs on a machine with nothing downloaded and no network.
     import json
     vid = os.path.join(_BASE, "media", "3", "IJE50gujMTg.mp4")
     sidecar = os.path.join(_BASE, "media", "3", "IJE50gujMTg.words.json")
-    if not (os.path.exists(vid) and os.path.exists(sidecar)):
-        print("smoke skipped: fetch media/3 first")
-        sys.exit(0)
-    with open(sidecar, encoding="utf-8") as f:
-        all_words = json.load(f)["words"]
-    seg = [w for w in all_words if 60 <= w["start"] < 65]
-    hook = "Anak Muda Ini Sukses Jadi Clipper 😱 25 Juta Per Bulan !! 💰🔥"
-    seg = list(seg)
-    if len(seg) > 2:
-        seg[2] = dict(seg[2], word=seg[2]["word"] + " 🔥")  # karaoke emoji path
-    for mode, ss in (("split", True), ("clean", False)):
-        out = os.path.join(_BASE, f"smoke_{mode}.mp4")
-        render_clip(vid, 60, 65, seg, out, hook=hook, split_screen=ss, bgm=ss)
-        assert os.path.exists(out) and os.path.getsize(out) > 100_000, mode
-        print(f"smoke {mode}: OK ({os.path.getsize(out)//1000} KB)")
+    synthetic = _tf.mkdtemp(prefix="clipper_smoke_")
+    try:
+        if os.path.exists(vid) and os.path.exists(sidecar):
+            with open(sidecar, encoding="utf-8") as f:
+                all_words = json.load(f)["words"]
+            seg = [w for w in all_words if 60 <= w["start"] < 65]
+            base = 60.0
+        else:
+            print("no footage on disk, generating some with ffmpeg")
+            vid = os.path.join(synthetic, "source.mp4")
+            # 1920x1080 so the 9:16 crop has to do real work, with an audio
+            # track so the amix and restamp path is exercised too.
+            gen = subprocess.run(
+                [FFMPEG, "-y", "-v", "error",
+                 "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=8",
+                 "-f", "lavfi", "-i", "sine=frequency=180:duration=8",
+                 "-c:v", CODEC, "-pix_fmt", "yuv420p", "-c:a", "aac",
+                 "-shortest", vid], capture_output=True, text=True)
+            if gen.returncode != 0:
+                print(f"smoke skipped: ffmpeg cannot generate footage "
+                      f"({gen.stderr.strip()[:120]})")
+                sys.exit(0)
+            seg = [{"word": w, "start": 0.4 + i * 0.42, "end": 0.78 + i * 0.42}
+                   for i, w in enumerate(
+                       "jadi gue dulu mikir bikin konten itu susah "
+                       "banget padahal bukan idenya".split())]
+            base = 0.0
+
+        hook = "Anak Muda Ini Sukses Jadi Clipper 😱 25 Juta Per Bulan !! 💰🔥"
+        seg = list(seg)
+        if len(seg) > 2:
+            seg[2] = dict(seg[2], word=seg[2]["word"] + " 🔥")  # karaoke emoji path
+        for mode, ss in (("split", True), ("clean", False)):
+            out = os.path.join(_BASE, f"smoke_{mode}.mp4")
+            render_clip(vid, base, base + 5, seg, out, hook=hook,
+                        split_screen=ss, bgm=ss)
+            assert os.path.exists(out) and os.path.getsize(out) > 100_000, mode
+            print(f"smoke {mode}: OK ({os.path.getsize(out)//1000} KB)")
+    finally:
+        shutil.rmtree(synthetic, ignore_errors=True)

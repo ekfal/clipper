@@ -1,22 +1,15 @@
-# Runtime dependencies. Install with:  pip install -r requirements.txt
+# Every runtime dependency. Install with:  pip install -r requirements.txt
 # ffmpeg itself is a system package, not a Python one:  apt install ffmpeg
 # Fonts too:  apt install fonts-dejavu-core fonts-noto-color-emoji
+#
+# To render clips and nothing else, requirements-clip.txt is a quarter of this
+# list. It is pulled in below rather than duplicated, so nothing drifts.
+-r requirements-clip.txt
 
 # --- footage ---------------------------------------------------------------
-# yt-dlp breaks whenever YouTube changes; keep it updated rather than pinned
-# tight, and see fetch.py for the cookies + PO-token setup a flagged VPS needs.
-yt-dlp>=2025.1.1
+# yt-dlp comes from requirements-clip.txt. gdown is only for Drive links, so
+# it stays here: a link-in-link-out job never reaches it.
 gdown>=5.2.0
-
-# --- transcription ---------------------------------------------------------
-# CPU-only, int8. The model itself downloads on first run (~500 MB for "small").
-faster-whisper>=1.1.0
-
-# --- editing ---------------------------------------------------------------
-Pillow>=10.3.0
-
-# --- 9Router client --------------------------------------------------------
-requests>=2.32.0
 
 # --- Clippo session + public profile stats ---------------------------------
 # after install:  playwright install chromium
