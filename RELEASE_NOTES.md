@@ -454,6 +454,96 @@ _Dalmislave_
 
 ---
 
+## v0.3 - antislop, and what it found
+
+[antislop](https://github.com/miqdadbadjuber/anti-slop) is a filter that stops
+an agent producing the generic output a model defaults to. Six skills are
+checked into `.claude/skills/` at a pinned upstream commit, and `CLAUDE.md`
+points at them, so they load in every session from the next one onward.
+
+Checked in rather than fetched: the version cannot change under a session
+mid-task, and nothing downloads its own next instructions at runtime.
+
+### Where the rules apply here
+
+The core forbids the em dash "in any text". In this repo that means the text
+the project **ships**: what is drawn on a clip, posted with it, or rendered by
+the dashboard. Python comments and these notes are internal prose, governed by
+the code-comment skill, which says nothing about dashes. Rewriting a thousand
+comments would have been churn, not craft. The line is written down in
+`CLAUDE.md` so the next session does not relitigate it.
+
+### The copy that ships on every clip
+
+`metadata.py` writes the hook, title and description with an LLM, and that copy
+goes on the frame and under our own accounts. The prompt now states the
+constraints, and, because a prompt constraint is a request a model can decline,
+the ones that matter are enforced after the reply lands:
+
+- **Connector dashes are replaced.** Em dash, en dash, and the spaced double
+  hyphen, in all three fields.
+- **A figure the speaker never said is dropped.** The clause carrying it is
+  removed before anything renders. A hook that loses its only sentence falls
+  back to transcript-derived copy rather than shipping a lone emoji.
+- **Filler is reported, not rewritten.** Cutting a phrase out of a sentence
+  usually leaves worse copy than the phrase did, so the run prints what it saw.
+
+The number rule only fires on figures carrying a scale or a unit (`%`, juta,
+ribu, kali lipat). A bare small count is a count, not a statistic: "cuma butuh
+2 menit" survives. A figure the transcript does contain is reporting, not
+invention, and survives too. Both cases are pinned by the self-check.
+
+Why it matters more than it sounds: an invented "90% orang gagal" on a clip is
+a fabricated statistic published under an account we are trying to keep alive.
+
+### The dashboard, measured rather than eyeballed
+
+The audit found real defects, not style opinions:
+
+| Finding | Rule | Measured |
+|---|---|---|
+| Muted text, table headers and links in light mode | R-25 | 2.53:1 to 3.08:1, under the 4.5:1 floor |
+| Platform checkbox labels in light mode | R-34 | 1.18:1, effectively invisible |
+| Five of six status pills | R-25 | white on the pill measured 2.52:1 to 3.85:1 |
+| Eight-column table on a phone | R-03 | the page scrolled sideways |
+| Buttons at 24px tall | R-03 | under the 44px tap target |
+| No focus style anywhere | R-32 | keyboard users could not see their position |
+| `/warmup` and `/delete` unguarded | R-27 | a DB error gave a raw 500 instead of the error banner |
+| Palette | R-30 | GitHub's dark theme, hex for hex |
+
+All fixed. The palette is not replaced with invented taste: it reuses
+`edit.py`'s `QUOTE_TEAL` and `PHRASE_COLOR`, both sampled off the reference
+clips, on warm neutrals. The console and the clips it ships now look related,
+and every choice has a one-line reason next to it in the CSS.
+
+Teal carries links and the primary action. Gold is the single accent and
+appears once, on `campaign_ready`, the only status that means an account can
+take work. Status pills went from white text to ink text, which is what fixed
+their contrast.
+
+### Verified in a browser, not asserted
+
+Chromium drove the page at 375px and 1280px, in both themes: zero horizontal
+overflow, every rendered text node measured against its real computed
+background, every control at least 44px on a phone, a focus ring on all 14 tab
+stops, no console errors, and all seven controls clicked one at a time.
+16 of 16. `antislop-human/contrast-check.py` confirmed every pairing
+independently.
+
+Sync fails in that run for an unrelated reason: this container's Playwright
+build does not match its bundled Chromium. It failed into the dashboard's own
+error banner, which is the error state doing its job.
+
+### Comments
+
+Eleven banner comments built from rules of dashes lost the decoration and kept
+their words. Nothing else changed: the density scan came back clean, with no
+step narration, no empty labels, no vague TODOs and no end markers.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
@@ -472,6 +562,14 @@ Read this before relying on the pipeline unattended.
   file and holding the conversation are the agent's.
 - **No queue.** A busy host refuses rather than holding the request; whether
   that is right depends on how the agent handles a retry.
+- **No `DESIGN.md`.** The dashboard borrows the clip palette, which is a real
+  source, but there is no written direction for anything new. Under antislop's
+  own rule that makes new UI a draft, not a deliverable, until someone writes
+  the direction down.
+- **The renderer was not audited against antislop.** `edit.py` draws on video
+  frames, and the rules are written for web UI: the contrast checker assumes a
+  flat background, and a caption sits over moving footage. The reference clips
+  remain the standard there.
 - **The network itself is untested.** The download logic is driven against
   stubbed yt-dlp and gdown, but nothing here reaches YouTube or Drive; cookies,
   PO tokens and IP reputation are only testable on the host, with

@@ -142,7 +142,7 @@ def words_in(words, start, end):
     return [w for w in words if start <= w["start"] < end]
 
 
-# ---------------------------------------------------------------- topical (LLM)
+# Topical selection, via the LLM.
 
 TOPIC_SYSTEM = """You are a short-form video editor for Indonesian audiences.
 You receive a timestamped transcript of a long video and must cut self-contained
@@ -337,7 +337,7 @@ if __name__ == "__main__":
                    for i in range(600)]  # 300s, enough for the 60s minimum
     assert pick_segments(300, None, short_words, "youtube", 1), "short footage starved"
 
-    # --- topical path (stubbed model) ---
+    # The topical path, against a stubbed model.
     line = compress_transcript(words)
     lines = line.splitlines()
     assert line.startswith("[0] w0 "), line[:40]

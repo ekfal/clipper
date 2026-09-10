@@ -105,7 +105,7 @@ def _destinations(conn, campaign_id, reqs):
 
     farming = [p for p in publishable if p not in CAMPAIGN_PLATFORMS]
     if farming:
-        why = "no paying platform live — farming channels only"
+        why = "no paying platform live, farming channels only"
         if required:
             why += f" (campaign wants {'+'.join(required)})"
         return farming, why

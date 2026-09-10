@@ -82,7 +82,7 @@ def _log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
-# --------------------------------------------------------------- catalogue
+# Catalogue: what an agent can ask for.
 
 def catalogue():
     """Everything the caller may choose from, with a line of copy for each.
@@ -140,7 +140,7 @@ def catalogue():
     }
 
 
-# ------------------------------------------------------------------- job
+# One job: two links in, one clip out.
 
 def _fetch_one(url, tag):
     """Download one link to its own folder. Returns the biggest video file."""

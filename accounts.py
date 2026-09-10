@@ -177,7 +177,7 @@ def evaluate(row):
                           f"(healthy is 50+ within 24h)")
 
     if status == "new":
-        return "warming", "not warmed up yet — start the warm-up routine"
+        return "warming", "not warmed up yet; start the warm-up routine"
 
     days = _days_since(row["warmup_started_at"])
     need = WARMUP_DAYS.get(row["platform"], 3)
@@ -186,14 +186,14 @@ def evaluate(row):
             return "warming", "warm-up start date missing"
         if days < need:
             return "warming", f"warming {days:.1f}/{need} days on {row['platform']}"
-        return "farming", f"warm-up done ({days:.1f} days) — safe to start posting"
+        return "farming", f"warm-up done ({days:.1f} days), safe to start posting"
 
     target = row["followers_target"] or DEFAULT_FOLLOWER_TARGET
     if status == "farming":
         if (row["followers"] or 0) < target:
             return "farming", f"{row['followers'] or 0}/{target} followers"
         if not row["verified_bio_code"]:
-            return "farming", (f"{row['followers']} followers — needs the Clippo "
+            return "farming", (f"{row['followers']} followers, needs the Clippo "
                                f"6-digit bio code before campaign work")
         return "campaign_ready", f"{row['followers']} followers and verified"
 
@@ -272,7 +272,7 @@ def sync(conn, account_id, timeout_ms=45000):
 
     stats = _stats_from_text(body)
     if not stats:
-        raise RuntimeError("could not read stats — profile private, renamed, "
+        raise RuntimeError("could not read stats: profile private, renamed, "
                            "or the platform served a bot wall")
     stats["synced_at"] = _now()
     update(conn, account_id, **stats)

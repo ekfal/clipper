@@ -19,10 +19,18 @@ app = FastAPI(title="Clipper accounts")
 HOST = os.environ.get("CLIPPER_DASH_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CLIPPER_DASH_PORT", "8000"))
 
+# Pill backgrounds. Every one carries ink text, not white: white on the old
+# saturated set measured 2.5:1 to 3.9:1, under the 4.5:1 the 11px label needs.
+# Six hues is past the 2-3 palette limit on purpose, because status is the
+# column you scan this table for; the reason is the exception.
+# Gold is the accent and goes to campaign_ready alone, the one status that
+# means an account can take work. The status word sits inside the pill, so the
+# hue is a second signal, never the only one.
 STATUS_COLORS = {
-    "new": "#8b8b8b", "warming": "#d18616", "farming": "#2f86d1",
-    "campaign_ready": "#2ea043", "paused": "#d29922", "banned": "#cf3b3b",
+    "new": "#B8B0A4", "warming": "#C9A227", "farming": "#64BBA8",
+    "campaign_ready": "#FFD24A", "paused": "#8C8FA8", "banned": "#FF7A8A",
 }
+PILL_INK = "#12100E"
 
 
 def _conn():
@@ -46,49 +54,90 @@ def _esc(v):
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <title>Clipper accounts</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
 <style>
- :root{color-scheme:light dark}
+ /* Palette: the clip colours, so the console and the clips it ships look
+    related. Teal #64BBA8 and gold #FFD24A are edit.py's QUOTE_TEAL and
+    PHRASE_COLOR, both sampled off the reference clips. Neutrals are warm
+    (#12100E / #FBFAF7) rather than the blue-black this page used to borrow
+    from GitHub, which gave it no identity of its own.
+    Teal carries links and the primary action; gold is the single accent and
+    appears once, on campaign_ready. Every pairing below was measured with
+    .claude/skills/antislop-human/contrast-check.py and clears 4.5:1. */
+ :root{
+   color-scheme:light dark;
+   --bg:#12100E; --card:#1C1917; --line:#2A2622;
+   --fg:#EDE9E1; --muted:#A39C90;
+   --mark:#64BBA8; --accent:#FFD24A; --danger:#FF8FA0;
+   --btn:#241F1B; --btn-line:#3A342E; --on-mark:#12100E;
+ }
+ @media(prefers-color-scheme:light){
+   :root{
+     --bg:#FBFAF7; --card:#F2EFE9; --line:#E2DCD1;
+     --fg:#1C1917; --muted:#6B6459;
+     --mark:#0F6B58; --accent:#7A5A00; --danger:#A3121F;
+     --btn:#FFFFFF; --btn-line:#D8D1C5; --on-mark:#FFFFFF;
+   }
+ }
  body{font:14px/1.45 system-ui,sans-serif;margin:0;padding:24px;
-      background:#0d1117;color:#e6edf3}
- h1{font-size:18px;margin:0 0 4px} .sub{color:#8b949e;margin:0 0 20px}
- table{border-collapse:collapse;width:100%;font-size:13px}
- th,td{padding:8px 10px;border-bottom:1px solid #21262d;text-align:left;
+      background:var(--bg);color:var(--fg)}
+ h1{font-size:18px;margin:0 0 4px} .sub{color:var(--muted);margin:0 0 20px}
+ /* Tables are wider than a phone and reflowing eight columns of dense state
+    into cards would cost more than it returns here, so each one scrolls
+    inside its own box and the page itself never scrolls sideways. */
+ .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+ table{border-collapse:collapse;width:100%;font-size:13px;min-width:720px}
+ th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;
        vertical-align:top}
- th{color:#8b949e;font-weight:600;font-size:12px;text-transform:uppercase;
+ /* Uppercase with light tracking on the header row only: it separates labels
+    from data in a table dense enough that weight alone does not. */
+ th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;
     letter-spacing:.04em}
- tr:hover td{background:#161b22}
- .pill{display:inline-block;padding:2px 9px;border-radius:999px;color:#fff;
+ tr:hover td{background:var(--card)}
+ .pill{display:inline-block;padding:2px 9px;border-radius:999px;
        font-size:11px;font-weight:600}
- .muted{color:#8b949e} .why{color:#8b949e;font-size:12px;margin-top:3px}
+ .muted{color:var(--muted)} .why{color:var(--muted);font-size:12px;margin-top:3px}
  .num{font-variant-numeric:tabular-nums}
  form.inline{display:inline}
- button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid #30363d;
-        background:#21262d;color:#e6edf3;cursor:pointer}
- button:hover{background:#30363d}
- button.go{border-color:#2ea043;background:#1a7f37}
- button.del{border-color:#6e2b2b;background:#3d1d1d;color:#ffb4b4}
+ button{font:inherit;padding:6px 12px;min-height:34px;border-radius:6px;
+        border:1px solid var(--btn-line);background:var(--btn);color:var(--fg);
+        cursor:pointer}
+ button:hover{border-color:var(--mark)}
+ button.go{border-color:var(--mark);background:var(--mark);color:var(--on-mark);
+           font-weight:600}
+ button.del{border-color:var(--danger);background:transparent;color:var(--danger)}
+ button[aria-busy="true"]{opacity:.65;cursor:progress}
+ /* Keyboard users need to see where they are; the ring is the mark colour,
+    which measures over 6:1 against both grounds. */
+ :focus-visible{outline:2px solid var(--mark);outline-offset:2px;border-radius:4px}
+ a{color:var(--mark)}
+ a:hover{text-decoration-thickness:2px}
+ /* The status reason is a sentence, not a token: without a floor it squeezed
+    to one word per line and made every row six lines tall. */
+ td:nth-child(2){min-width:190px}
  td:last-child{white-space:nowrap}
  td:last-child form{margin-right:4px}
- .card{background:#161b22;border:1px solid #21262d;border-radius:10px;
+ .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
        padding:16px;margin-bottom:22px}
  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
- label{display:block;font-size:12px;color:#8b949e;margin-bottom:3px}
- input,select{font:inherit;padding:6px 8px;border-radius:6px;
-              border:1px solid #30363d;background:#0d1117;color:#e6edf3}
- .err{background:#3d1d1d;border:1px solid #6e2b2b;padding:10px 14px;
-      border-radius:8px;margin-bottom:16px}
- a{color:#58a6ff}
- @media(prefers-color-scheme:light){
-   body{background:#fff;color:#1f2328} tr:hover td{background:#f6f8fa}
-   .card{background:#f6f8fa;border-color:#d0d7de}
-   th,td{border-color:#d8dee4} input,select,button{background:#fff;color:#1f2328;
-     border-color:#d0d7de} button.go{background:#1a7f37;color:#fff}
-   button.del{background:#fff;color:#b62324;border-color:#f0b3b3}
-   .err{background:#fff1f1;border-color:#ffc1c1}
+ label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
+ .plat{display:inline-flex;gap:4px;align-items:center;margin-right:8px;
+       color:var(--fg)}
+ input,select{font:inherit;padding:7px 8px;min-height:34px;border-radius:6px;
+              border:1px solid var(--btn-line);background:var(--btn);
+              color:var(--fg)}
+ .err{background:var(--card);border:1px solid var(--danger);
+      border-left-width:4px;padding:10px 14px;border-radius:8px;
+      margin-bottom:16px;color:var(--fg)}
+ /* A thumb is not a cursor: controls grow to the 44px target on a phone. */
+ @media(max-width:700px){
+   body{padding:16px}
+   button,input,select{min-height:44px}
+   .row{gap:12px} .row>div{flex:1 1 100%}
  }
 </style></head><body>
 <h1>Clipper accounts</h1>
-<p class="sub">Warm-up &rarr; farming &rarr; campaign ready. Suggestions are
+<p class="sub">Warm-up, then farming, then campaign ready. Suggestions are
 advisory; you apply them.</p>
 __ERROR__
 <div class="card"><form method="post" action="/add"><div class="row">
@@ -102,20 +151,36 @@ __ERROR__
 </div></form></div>
 <h2 style="font-size:15px;margin:26px 0 8px">Campaigns</h2>
 <p class="sub" style="margin:0 0 12px">Destinations are derived from the brief and
-your ready accounts. Pin one only when the rule gets it wrong &mdash; pinning a
+your ready accounts. Pin one only when the rule gets it wrong. Pinning a
 platform you cannot publish to sizes clips for a surface that never receives them.</p>
-<table><thead><tr>
+<div class="tablewrap"><table><thead><tr>
  <th>Campaign</th><th>Brief wants</th><th>Destinations now</th><th>Pin</th>
-</tr></thead><tbody>__CAMPAIGNS__</tbody></table>
+</tr></thead><tbody>__CAMPAIGNS__</tbody></table></div>
 
 <h2 style="font-size:15px;margin:26px 0 8px">Accounts</h2>
-<table><thead><tr>
+<div class="tablewrap"><table><thead><tr>
  <th>Account</th><th>Status</th><th>Followers</th><th>Posts</th>
  <th>Health</th><th>Verified</th><th>Device / proxy</th><th>Actions</th>
-</tr></thead><tbody>__ROWS__</tbody></table>
-<p class="sub" style="margin-top:18px">__COUNT__ &middot; stats read from public
-profiles &middot; healthy new account: 50+ views in 24h, 0&ndash;5 across 3+ clips
-signals a shadowban</p>
+</tr></thead><tbody>__ROWS__</tbody></table></div>
+<p class="sub" style="margin-top:18px">__COUNT__. Stats are read from public
+profiles. A healthy new account clears 50 views in 24h; 0 to 5 views across 3 or
+more clips signals a shadowban.</p>
+<script>
+/* Every control here is a form POST, and /sync scrapes a live profile, so the
+   page can sit for seconds with nothing to show it is working. Label the
+   button that was pressed instead of leaving the click unanswered. It is
+   marked busy after submission, never before, so the POST still goes. */
+document.addEventListener('submit', function (e) {
+  var b = e.target.querySelector('button[type=submit]:focus') ||
+          e.target.querySelector('button[type=submit]');
+  if (!b) return;
+  var was = b.textContent;
+  setTimeout(function () {
+    b.setAttribute('aria-busy', 'true');
+    b.textContent = was.trim() === 'Delete' ? 'Deleting...' : 'Working...';
+  }, 0);
+});
+</script>
 </body></html>"""
 
 
@@ -134,17 +199,16 @@ def _campaign_rows(conn):
         pinned = db.campaign_override(conn, c["campaign_id"]) or []
         dests, why = pipeline._destinations(conn, c["campaign_id"], reqs)
         window = segments.duration_window(dests)
-        win = f"{window[0]}&ndash;{window[1]}s" if window else "no common length"
+        win = f"{window[0]}-{window[1]}s" if window else "no common length"
         boxes = "".join(
-            f'<label style="display:inline-flex;gap:4px;align-items:center;'
-            f'margin-right:8px;color:#e6edf3">'
+            f'<label class="plat">'
             f'<input type="checkbox" name="platforms" value="{p}"'
             f'{" checked" if p in pinned else ""}>{p}</label>'
             for p in accounts.PLATFORMS)
         out.append(f"""<tr>
  <td>{_esc(reqs.get('title') or c['campaign_id'])}<br>
      <span class="muted">{_esc(c['campaign_id'])} &middot; {_esc(c['status'])}</span></td>
- <td class="muted">{_esc('+'.join(reqs.get('platforms_required') or []) or '—')}</td>
+ <td class="muted">{_esc('+'.join(reqs.get('platforms_required') or []) or '-')}</td>
  <td><b>{_esc('+'.join(dests))}</b> <span class="muted">{win}</span>
      <div class="why">{_esc(why)}</div></td>
  <td><form method="post" action="/destinations">
@@ -182,14 +246,14 @@ def render(error=""):
         out.append(f"""<tr>
  <td><a href="{_esc(r['profile_url'])}" target="_blank" rel="noreferrer">
      {_esc(r['platform'])}/{_esc(r['username'])}</a><br>
-     <span class="muted">{_esc(r['niche'] or '—')}</span></td>
- <td><span class="pill" style="background:{color}">{_esc(r['status'])}</span>
+     <span class="muted">{_esc(r['niche'] or '-')}</span></td>
+ <td><span class="pill" style="background:{color};color:{PILL_INK}">{_esc(r['status'])}</span>
      <div class="why">{_esc(why)}</div></td>
  <td class="num">{r['followers'] or 0}<span class="muted"> / {r['followers_target'] or 10}</span></td>
  <td class="num">{r['video_count'] or 0}</td>
  <td>{health}</td>
- <td>{'✔ ' + _esc(r['verified_bio_code']) if r['verified_bio_code'] else '<span class="muted">—</span>'}</td>
- <td class="muted">{_esc(r['device_label'] or '—')} / {_esc(r['proxy_label'] or '—')}</td>
+ <td>{'✔ ' + _esc(r['verified_bio_code']) if r['verified_bio_code'] else '<span class="muted">-</span>'}</td>
+ <td class="muted">{_esc(r['device_label'] or '-')} / {_esc(r['proxy_label'] or '-')}</td>
  <td>{warm}{apply_btn}
    <form class="inline" method="post" action="/sync">
      <input type="hidden" name="account_id" value="{r['account_id']}">
@@ -247,7 +311,13 @@ def set_status(account_id: int = Form(...), status: str = Form(...)):
 
 @app.post("/warmup")
 def warmup(account_id: int = Form(...)):
-    accounts.start_warmup(_conn(), account_id)
+    # Every mutating route reports its failure in the page's own error banner.
+    # Without this the operator gets a raw 500 stack page instead, which is the
+    # one state the dashboard cannot explain itself in.
+    try:
+        accounts.start_warmup(_conn(), account_id)
+    except Exception as e:
+        return _back(f"{type(e).__name__}: {e}")
     return _back()
 
 
@@ -282,7 +352,10 @@ def set_destinations(campaign_id: str = Form(...),
 
 @app.post("/delete")
 def delete(account_id: int = Form(...)):
-    accounts.delete(_conn(), account_id)
+    try:
+        accounts.delete(_conn(), account_id)
+    except Exception as e:
+        return _back(f"{type(e).__name__}: {e}")
     return _back()
 
 

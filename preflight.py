@@ -120,7 +120,7 @@ def main():
           + (f", filed to github:{report.GH_REPO}" if report.GH_TOKEN and report.GH_REPO
              else " (set CLIPPER_GITHUB_TOKEN + CLIPPER_GITHUB_REPO to file issues)"))
 
-    # --- timing ---
+    # Timing: the two stages whose cost decides whether an hourly run fits.
     videos = []
     media = os.path.join(_BASE, "media")
     for root, _, names in os.walk(media):

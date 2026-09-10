@@ -72,7 +72,7 @@ PADDING = 40
 STROKE = 5
 ACTIVE_COLOR = "#87CEFA"
 
-# ---- phrase captions (reference style) -------------------------------------
+# Phrase captions, the reference style.
 # Whole phrases in one colour instead of a per-word highlight: gold by default,
 # magenta for the beat the model marks as the punchline. Heavy black stroke is
 # what keeps them legible over any footage.

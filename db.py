@@ -140,7 +140,7 @@ def enqueue_footage(conn, campaign_id, footage_url, source_type):
     return cur.lastrowid if cur.rowcount else None
 
 
-# --- per-campaign destination override (dashboard) -------------------------
+# Per-campaign destination override, set from the dashboard.
 # Stored inside platform_specific_data rather than a new column: the column is
 # already the documented home for per-campaign extras (PRD §3.0), and a
 # migration for a field most campaigns never set is not worth it.
@@ -339,7 +339,7 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    # --- a failure must not free another task's published segments ----------
+    # A failure must not free another task's published segments.
     c2 = init_db(os.path.join(tempfile.mkdtemp(), "t2.sqlite"))
     upsert_campaign(c2, T(campaign_id="A"))
     upsert_campaign(c2, T(campaign_id="B"))
@@ -359,7 +359,7 @@ if __name__ == "__main__":
     assert left == [(100.0, 160.0), (300.0, 360.0)], left   # published ones survive
     assert len(left) == 2, "a failure freed segments it did not own"
 
-    # --- abandoned tasks come back to the queue ----------------------------
+    # Abandoned tasks come back to the queue.
     tc = enqueue_footage(c2, "A", "http://x/2", "youtube")
     set_task_status(c2, tc, "EDITING")
     assert stale_tasks(c2, minutes=60) == [], "a fresh task is not stale"

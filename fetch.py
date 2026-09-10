@@ -445,7 +445,7 @@ if __name__ == "__main__":
     _probe = probe_seconds(os.path.join(_BASE, "does-not-exist.mp4"))
     assert _probe is None, "probing a missing file should return None"
 
-    # --- the YouTube path, exercised against a stubbed yt-dlp ---------------
+    # The YouTube path, exercised against a stubbed yt-dlp.
     # The network is the one thing no test here can reach, so everything around
     # it is driven instead: the pre-download duration refusal, the merged-
     # extension fallback, the heatmap sidecar and the low-resolution warning.
@@ -541,7 +541,7 @@ if __name__ == "__main__":
         else:
             sys.modules["yt_dlp"] = _saved_mod
 
-    # --- the Drive path, against a stubbed gdown ---------------------------
+    # The Drive path, against a stubbed gdown.
     _gd = _types.ModuleType("gdown")
     _saved_gd = sys.modules.get("gdown")
     sys.modules["gdown"] = _gd
