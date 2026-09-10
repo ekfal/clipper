@@ -30,5 +30,8 @@ Two limits worth telling a user about before they wait:
 
 `python preflight.py` reports which of those are missing on this box.
 
+If you are being set up as a Discord bot, `hermes-prompt.md` is the prompt to
+use, and it covers the upload-size problem this repo's default bitrate creates.
+
 `CLAUDE.md` holds the working notes, the house rules and the antislop pointer.
 Read it before changing code.

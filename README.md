@@ -122,6 +122,9 @@ returns to `DISCOVERED`.
 | `report.py` | Diagnostics on failure, optionally filed as a GitHub issue. |
 | `preflight.py` | What this box is missing, and what the slow stages cost. |
 
+`hermes-prompt.md` holds the system prompt for driving this from a chat
+agent, with the Discord upload limits worked out.
+
 Every module has a `__main__` self-check. Run the ones you touch; they are the
 test suite. `CLAUDE.md` holds the working notes and the house rules,
 `RELEASE_NOTES.md` what changed and what is still broken.

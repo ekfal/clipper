@@ -166,8 +166,52 @@ def _fetch_one(url, tag):
     return max(files, key=os.path.getsize)
 
 
+
+def _delivery_copy(path, max_mb):
+    """Re-encode under max_mb when the render is too big to send. Returns the
+    new path, or None when the original already fits or the squeeze fails.
+
+    The render targets 6 Mbps because it is the file that gets uploaded to a
+    platform, and a 90s clip at that rate is 66 MB. Discord takes 10 MB on a
+    free account and 50 MB on Nitro Basic, so the thing a chat agent hands back
+    has to be a smaller copy. The original is left alone: the delivery copy is
+    for looking at, not for publishing.
+    """
+    import subprocess
+
+    import edit
+
+    if max_mb <= 0 or os.path.getsize(path) <= max_mb * 1024 * 1024:
+        return None
+    seconds = None
+    try:
+        import fetch
+        seconds = fetch.probe_seconds(path)
+    except Exception:
+        pass
+    if not seconds:
+        return None
+    # Leave headroom for the container and the audio track we are about to fix
+    # at 96k; aiming at exactly the cap overshoots it often enough to matter.
+    total_kbit = (max_mb * 8 * 1024) / seconds * 0.90
+    video_kbit = max(300, int(total_kbit - 96))
+    small = os.path.splitext(path)[0] + "_small.mp4"
+    cmd = [edit.FFMPEG, "-y", "-v", "error", "-i", path,
+           "-c:v", edit.CODEC, "-b:v", f"{video_kbit}k",
+           "-maxrate", f"{int(video_kbit * 1.3)}k", "-bufsize", f"{video_kbit * 2}k",
+           "-preset", "veryfast", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", small]
+    if subprocess.run(cmd, capture_output=True, text=True).returncode != 0:
+        return None
+    if not os.path.exists(small):
+        return None
+    _log(f"delivery copy: {os.path.getsize(small) / 1048576:.1f} MB "
+         f"(original {os.path.getsize(path) / 1048576:.1f} MB)")
+    return small
+
+
 def run(content_url, opening_url=None, hook=None, platform="youtube",
-        start=None, seconds=None, mood=None, out=None, **style):
+        start=None, seconds=None, mood=None, out=None, max_mb=0, **style):
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
     import bgm
     import edit
@@ -236,10 +280,15 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
                      accent_words=meta.get("punchline_words") or (),
                      intro=opening, **style)
 
+    small = _delivery_copy(out, max_mb)
     return {
         "ok": True,
         "file": os.path.abspath(out),
         "size_bytes": os.path.getsize(out),
+        # Present only when the render was over --max-mb. Send this one; the
+        # file above is the one that goes to a platform.
+        "delivery_file": os.path.abspath(small) if small else None,
+        "delivery_size_bytes": os.path.getsize(small) if small else None,
         "segment": [round(seg_start, 2), round(seg_end, 2)],
         "duration_sec": round(seg_end - seg_start, 2),
         "opening": bool(opening),
@@ -274,6 +323,10 @@ def main(argv=None):
     p.add_argument("--hook-style", dest="hook_style", choices=("boxes", "card"))
     p.add_argument("--wait", type=float, default=None,
                    help="seconds to wait if another job holds the host")
+    p.add_argument("--max-mb", dest="max_mb", type=float, default=0,
+                   help="also write a smaller copy when the render exceeds "
+                        "this, for a chat transport with an upload limit "
+                        "(Discord: 10 free, 50 Nitro Basic)")
     a = p.parse_args(argv)
 
     if a.list:
@@ -291,7 +344,7 @@ def main(argv=None):
         with _Lock(wait=a.wait if a.wait is not None else LOCK_WAIT):
             res = run(a.content, a.opening, hook=a.hook, platform=a.platform,
                       start=a.start, seconds=a.seconds, mood=a.mood, out=a.out,
-                      **style)
+                      max_mb=a.max_mb, **style)
     except Busy as e:
         # not a failure of this job, so it gets no report and its own code —
         # the caller should retry rather than escalate

@@ -624,6 +624,42 @@ _Dalmislave_
 
 ---
 
+## v0.3.3 - the clip is too big to send
+
+Writing the Hermes prompt turned up a hole in the plan it describes. The render
+targets 6 Mbps, because that file is the one uploaded to TikTok or YouTube. A
+90 second clip is therefore about 66 MB, and Discord takes 10 MB on a free
+account. The chat step of the plan could not have worked.
+
+`job.py --max-mb N` now writes a second, smaller copy when the render is over
+the limit, and returns both paths:
+
+```json
+{"file": "/path/clip.mp4",       "size_bytes": 46000000,
+ "delivery_file": "/path/clip_small.mp4", "delivery_size_bytes": 9100000}
+```
+
+The original is untouched: the small one is for looking at, the full one is for
+publishing, and the prompt tells the agent to say which is which so nobody
+posts the compressed copy to a platform. Default is 0, meaning off, so the
+pipeline is unaffected. Verified on the 13.9 MB test render: a 9 MB cap
+produced 8.0 MB, a 45 MB cap correctly produced nothing.
+
+What it cannot do is make the arithmetic kinder. Fitting 90 seconds of
+1080x1920 into 9 MB means 0.7 Mbps, and no encoder setting rescues that. On a
+free Discord account a 90 second clip cannot arrive looking good; Nitro Basic
+at 50 MB is the only option that keeps the plan intact, and `hermes-prompt.md`
+gives the numbers rather than leaving it to be discovered during a demo.
+
+**`hermes-prompt.md`** holds the system prompt itself: the catalogue-first
+flow, the two-link contract, what exit 3 means, which file to upload, and how
+to read a failure without pasting a traceback into a chat. Every flag it names
+was checked against `job.py`, and every number in it recomputed.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
