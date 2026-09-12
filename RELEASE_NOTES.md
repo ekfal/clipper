@@ -695,6 +695,29 @@ _Dalmislave_
 
 ---
 
+## v0.3.5 - a prompt that fits in a Discord message
+
+The prompt written in v0.3.3 was 5023 characters. A free Discord account caps a
+message at 2000, so it could not be sent as one, which is how it was meant to
+be delivered.
+
+`hermes-prompt.md` now carries both. The short one is 1969 characters with 31
+to spare for editing `--max-mb`. It drops the setup commands, which are a
+one-time job better sent separately, and compresses the failure taxonomy to the
+three cases that actually recur.
+
+What survives untouched is the hook rule, stated at the same length as before.
+It is the part that changes what lands on the video, and the part an agent is
+most likely to be helpful about in exactly the wrong way.
+
+The long version stays for a config field or a Nitro account, where the cap is
+4000. Every flag named in both was checked against `job.py`'s parser again
+after the cut.
+
+_Dalmislave_
+
+---
+
 ## Known gaps
 
 Read this before relying on the pipeline unattended.
